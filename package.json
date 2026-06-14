@@ -32,7 +32,7 @@
     "registry": "http://localhost:4873"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "bunx tsc",
     "lint": "oxlint .",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
