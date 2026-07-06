@@ -21,7 +21,7 @@
   "files": [
     "dist"
   ],
-  "license": "MIT",
+  "license": "UNLICENSED",
   "main": "./dist/index.js",
   "packageManager": "bun@1.3.14",
   "peerDependencies": {
