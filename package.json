@@ -3,7 +3,8 @@
   "description": "CuraOS typed event schema contracts for event-led architecture.",
   "version": "0.1.0",
   "devDependencies": {
-    "@curaos/tsconfig": "0.0.0",
+    "oxlint": "1.68.0",
+    "@curaos/tsconfig": "workspace:*",
     "@types/bun": "1.3.14",
     "@types/node": "22.19.19",
     "typescript": "5.9.3",
