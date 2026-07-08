@@ -85,7 +85,6 @@ private alpha
 
 - Docs generated from `tools/codegen/src/repo-docs-emit.ts`.
 - Public documentation: [docs.curaos.abualruz.com](https://docs.curaos.abualruz.com).
-- Changelog: [CHANGELOG.md](./CHANGELOG.md) when present.
 
 ---
 
