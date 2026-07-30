@@ -1,9 +1,0 @@
-{
-  "extends": "@curaos/tsconfig/nestjs.json",
-  "compilerOptions": {
-    "outDir": "dist",
-    "rootDir": "src"
-  },
-  "include": ["src"],
-  "exclude": ["src/**/*.test.ts", "test", "dist", "node_modules"]
-}
