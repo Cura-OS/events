@@ -1,0 +1,105 @@
+name: CI
+
+# Automatic PR gate. Until this landed, nothing in this repo ran typecheck,
+# lint, or tests on a pull request. Not registered as a required status check.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    if: github.event.pull_request.draft == false
+    runs-on: self-hosted
+    steps:
+      - name: Checkout CuraOS parent workspace
+        uses: actions/checkout@v4
+        with:
+          # This repo cannot `bun install` standalone: its package.json declares
+          # sibling packages with the workspace protocol and its committed
+          # bun.lock is the monorepo lockfile. Dependencies are therefore
+          # resolved from the parent Bun workspace root, with this revision
+          # overlaid into its submodule slot. Cross-repo checkout of the private
+          # parent needs an org-wide read token; the repo-scoped GITHUB_TOKEN
+          # fallback 404s loudly rather than skipping silently.
+          repository: Cura-OS/curaos
+          token: ${{ secrets.WORKSPACE_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+          path: curaos-parent
+          persist-credentials: false
+
+      - name: Materialize workspace package members
+        # NOT `submodules: recursive` on the checkout above. The parent pins 212
+        # submodules and at least one pointer is dangling on its remote
+        # (accounting-core-service 8e8ba08, "upload-pack: not our ref"), which
+        # makes a recursive checkout exit 128 and would break this gate in every
+        # repo at once. Only the workspace PACKAGE members are needed to resolve
+        # `workspace:*` siblings, and `--remote` takes each one's current default
+        # branch instead of the parent's pinned SHA, so a stale pointer anywhere
+        # in the fleet cannot fail this job.
+        # The token is passed with `git -c` (process-scoped) rather than left in
+        # .git/config, which is why both checkouts keep persist-credentials: false.
+        working-directory: curaos-parent
+        env:
+          WORKSPACE_TOKEN: ${{ secrets.WORKSPACE_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git -c "url.https://x-access-token:${WORKSPACE_TOKEN}@github.com/.insteadOf=git@github.com:" \
+            submodule update --init --remote --depth 1 --jobs 8 \
+            backend/packages frontend/packages
+          # Fail closed: an empty package tree would silently degrade the install
+          # into "no workspace siblings found" and the gate would stop guarding.
+          test -n "$(find backend/packages -mindepth 2 -name package.json -print -quit)"
+
+      - name: Overlay this revision into the parent workspace
+        # The parent pins this repo at the committed submodule SHA, not the PR
+        # head. Re-check out THIS ref into the slot so the gate runs against the
+        # code under review while siblings still resolve from the workspace.
+        uses: actions/checkout@v4
+        with:
+          path: curaos-parent/backend/packages/events
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        # Not frozen: the overlaid head may legitimately differ from the pinned
+        # submodule the root lockfile was last solved against.
+        working-directory: curaos-parent
+        run: bun install
+
+      - name: Build workspace dependencies
+        # `bun run typecheck` inside the slot does not build this package's
+        # workspace siblings, and packages consumed through their `dist/` then
+        # fail to resolve (admin-app run 30789521776: "Cannot find module
+        # '@curaos/ui'" plus a TS7006 cascade downstream of it). The `^...`
+        # suffix is turbo's "dependencies of, excluding itself" selector.
+        working-directory: curaos-parent
+        run: bunx turbo run build --filter='@curaos/events^...'
+
+      - name: Run repo gates
+        working-directory: curaos-parent/backend/packages/events
+        run: |
+          set -euo pipefail
+          ran=0
+          if node -e "process.exit(require('./package.json').scripts?.ci ? 0 : 1)"; then
+            bun run ci
+            ran=1
+          else
+            for s in lint typecheck test build; do
+              if node -e "process.exit(require('./package.json').scripts?.$s ? 0 : 1)"; then
+                bun run "$s"
+                ran=1
+              fi
+            done
+          fi
+          # A gate that cannot fail is a failing gate: refuse to report success
+          # when package.json declared none of the gates this job exists to run.
+          if [ "$ran" -eq 0 ]; then
+            echo "::error::no ci/lint/typecheck/test/build script found; this gate would pass vacuously"
+            exit 1
+          fi
