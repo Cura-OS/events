@@ -25,4 +25,3 @@ export type {
   SubjectRightsRequestedEvent,
   SubjectRightsStepCompletedEvent,
 } from './subject-rights';
-export const gateProbe: number = "not a number";
