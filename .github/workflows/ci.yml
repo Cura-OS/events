@@ -12,7 +12,7 @@ permissions:
 jobs:
   ci:
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout CuraOS parent workspace
         uses: actions/checkout@v4
