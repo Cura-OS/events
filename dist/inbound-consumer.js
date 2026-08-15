@@ -119,15 +119,16 @@ class DurableInboundConsumer {
         }
         catch (error) {
             this.accepting = false;
-            this.closed = true;
-            this.assignmentEpoch += 1;
             this.rejectCatchUp(error);
-            await this.assignmentTail;
-            if (this.tornDown)
-                throw error;
-            this.tornDown = true;
-            const cleanupErrors = await this.cleanup();
-            throw this.withCleanup(error, cleanupErrors, 'consumer startup and cleanup failed');
+            try {
+                await this.shutdown();
+            }
+            catch (cleanupError) {
+                const cleanupErrors = (cleanupError instanceof AggregateError ? cleanupError.errors : [cleanupError])
+                    .filter((item) => item !== error);
+                throw this.withCleanup(error, cleanupErrors, 'consumer startup and cleanup failed');
+            }
+            throw error;
         }
     }
     /** Resolve once every boot-time partition high watermark is checkpointed. */
@@ -143,6 +144,7 @@ class DurableInboundConsumer {
         return this.shutdownPromise = this.shutdownInternal();
     }
     async shutdownInternal() {
+        await Promise.resolve();
         this.tornDown = true;
         this.closed = true;
         this.accepting = false;
@@ -156,7 +158,8 @@ class DurableInboundConsumer {
         catch (error) {
             errors.push(error);
         }
-        await this.assignmentTail;
+        void this.assignmentTail.catch((error) => { this.assignmentFailures.push(error); });
+        await Promise.resolve();
         errors.push(...this.assignmentFailures, ...await this.cleanup(false));
         if (errors.length > 0)
             throw this.withCleanup(errors[0], errors.slice(1), 'consumer shutdown failed');

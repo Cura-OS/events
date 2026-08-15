@@ -202,14 +202,15 @@ export class DurableInboundConsumer<T = unknown> {
       }
     } catch (error) {
       this.accepting = false;
-      this.closed = true;
-      this.assignmentEpoch += 1;
       this.rejectCatchUp(error);
-      await this.assignmentTail;
-      if (this.tornDown) throw error;
-      this.tornDown = true;
-      const cleanupErrors = await this.cleanup();
-      throw this.withCleanup(error, cleanupErrors, 'consumer startup and cleanup failed');
+      try {
+        await this.shutdown();
+      } catch (cleanupError) {
+        const cleanupErrors = (cleanupError instanceof AggregateError ? cleanupError.errors : [cleanupError])
+          .filter((item) => item !== error);
+        throw this.withCleanup(error, cleanupErrors, 'consumer startup and cleanup failed');
+      }
+      throw error;
     }
   }
 
@@ -226,6 +227,7 @@ export class DurableInboundConsumer<T = unknown> {
   }
 
   private async shutdownInternal(): Promise<void> {
+    await Promise.resolve();
     this.tornDown = true;
     this.closed = true;
     this.accepting = false;
@@ -234,7 +236,8 @@ export class DurableInboundConsumer<T = unknown> {
     this.rejectCatchUp(new Error('consumer shut down before catch-up'));
     const errors: unknown[] = [];
     try { await this.consumer.stop(); } catch (error) { errors.push(error); }
-    await this.assignmentTail;
+    void this.assignmentTail.catch((error) => { this.assignmentFailures.push(error); });
+    await Promise.resolve();
     errors.push(...this.assignmentFailures, ...await this.cleanup(false));
     if (errors.length > 0) throw this.withCleanup(errors[0], errors.slice(1), 'consumer shutdown failed');
   }
