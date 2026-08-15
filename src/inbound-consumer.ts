@@ -1,11 +1,10 @@
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { z } from 'zod';
 
 export interface ConsumerRecord {
   readonly topic: string;
   readonly partition: number;
   readonly offset: string;
-  /** Exclusive broker high-water offset captured with this delivery. */
-  readonly highWatermark: string;
   readonly key: Uint8Array | null;
   readonly value: Uint8Array | null;
   readonly headers: Readonly<Record<string, Uint8Array | string | undefined>>;
@@ -27,9 +26,15 @@ export interface Consumer {
     readonly eachMessage: (record: ConsumerRecord) => Promise<void>;
   }): Promise<void>;
   commitOffsets(offsets: readonly TopicPartitionOffset[]): Promise<void>;
-  /** Capture exclusive partition high-water offsets before live intake starts. */
-  highWaterMarks(topic: string): Promise<readonly { partition: number; offset: string }[]>;
+  /** Wait for paused assignment, then return broker bounds and current positions. */
+  assignedPartitions(topic: string): Promise<readonly {
+    partition: number;
+    low: string;
+    high: string;
+    position: string;
+  }[]>;
   seek(position: TopicPartitionOffset): void;
+  resume(topic: string, partitions: readonly number[]): void;
   stop(): Promise<void>;
   disconnect(): Promise<void>;
 }
@@ -70,6 +75,17 @@ export interface DurableInboundConsumerOptions<T> {
 }
 
 const nextOffset = (offset: string): string => (BigInt(offset) + 1n).toString();
+const decode = new TextDecoder('utf-8', { fatal: true });
+const nonnegativeInteger = (name: string, value: number): number => {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    throw new TypeError(`${name} must be a finite nonnegative integer`);
+  }
+  return value;
+};
+const positiveFinite = (name: string, value: number): number => {
+  if (!Number.isFinite(value) || value <= 0) throw new TypeError(`${name} must be finite and positive`);
+  return value;
+};
 const partitionKey = (record: Pick<ConsumerRecord, 'topic' | 'partition'>) =>
   `${record.topic}:${record.partition}`;
 
@@ -105,34 +121,32 @@ export class DurableInboundConsumer<T = unknown> {
     this.handler = options.handler;
     this.offsets = options.offsets;
     this.deadLetters = options.deadLetters;
-    this.maxRetries = Math.max(0, options.maxRetries ?? 5);
-    this.baseBackoffMs = Math.max(1, options.baseBackoffMs ?? 100);
-    this.sleep = options.sleep ?? ((milliseconds) => Bun.sleep(milliseconds));
+    this.maxRetries = nonnegativeInteger('maxRetries', options.maxRetries ?? 5);
+    this.baseBackoffMs = positiveFinite('baseBackoffMs', options.baseBackoffMs ?? 100);
+    this.sleep = options.sleep ?? sleep;
   }
 
   async start(): Promise<void> {
     await this.consumer.connect();
     await this.consumer.subscribe({ topics: [this.topic], fromBeginning: false });
-    const checkpoints = await this.offsets.loadTopic(this.topic);
-    for (const checkpoint of checkpoints) this.consumer.seek({ topic: this.topic, ...checkpoint });
-    const highWatermarks = await this.consumer.highWaterMarks(this.topic);
-    const durableOffsets = await Promise.all(
-      highWatermarks.map(({ partition }) => this.offsets.load(this.topic, partition)),
-    );
-    for (const [index, highWatermark] of highWatermarks.entries()) {
-      const key = `${this.topic}:${highWatermark.partition}`;
-      this.bootHighWatermarks.set(key, BigInt(highWatermark.offset));
-      const checkpoint = durableOffsets[index];
-      if (checkpoint !== undefined && BigInt(checkpoint) >= BigInt(highWatermark.offset)) {
-        this.caughtPartitions.add(key);
-      }
-    }
-    if (this.bootHighWatermarks.size === this.caughtPartitions.size) this.caughtUpResolve();
     this.accepting = true;
     await this.consumer.run({
       autoCommit: false,
       eachMessage: (record) => this.enqueue(record),
     });
+    const assignments = await this.consumer.assignedPartitions(this.topic);
+    const checkpoints = new Map(
+      (await this.offsets.loadTopic(this.topic)).map(({ partition, offset }) => [partition, offset]),
+    );
+    for (const assignment of assignments) {
+      const start = checkpoints.get(assignment.partition) ?? assignment.low;
+      this.consumer.seek({ topic: this.topic, partition: assignment.partition, offset: start });
+      const key = `${this.topic}:${assignment.partition}`;
+      this.bootHighWatermarks.set(key, BigInt(assignment.high));
+      if (BigInt(start) >= BigInt(assignment.high)) this.caughtPartitions.add(key);
+    }
+    if (this.bootHighWatermarks.size === this.caughtPartitions.size) this.caughtUpResolve();
+    this.consumer.resume(this.topic, assignments.map(({ partition }) => partition));
   }
 
   caughtUp(): Promise<void> {
@@ -141,9 +155,23 @@ export class DurableInboundConsumer<T = unknown> {
 
   async shutdown(): Promise<void> {
     this.accepting = false;
-    await this.consumer.stop();
-    await Promise.all(this.partitions.values());
-    await this.consumer.disconnect();
+    let primary: unknown;
+    try {
+      try {
+        await this.consumer.stop();
+      } catch (error) {
+        primary = error;
+      }
+      const results = await Promise.allSettled(this.partitions.values());
+      primary ??= results.find((result) => result.status === 'rejected')?.reason;
+    } finally {
+      try {
+        await this.consumer.disconnect();
+      } catch (error) {
+        primary ??= error;
+      }
+    }
+    if (primary !== undefined) throw primary;
   }
 
   private enqueue(record: ConsumerRecord): Promise<void> {
@@ -165,7 +193,7 @@ export class DurableInboundConsumer<T = unknown> {
     let parsed: T;
     try {
       if (record.value === null) throw new Error('record value is null');
-      parsed = this.schema.parse(JSON.parse(Buffer.from(record.value).toString('utf8')));
+      parsed = this.schema.parse(JSON.parse(decode.decode(record.value)));
     } catch (error) {
       await this.deadLetters.write({ record, reason: 'malformed', error });
       await this.advance(record);

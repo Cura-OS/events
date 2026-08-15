@@ -3,8 +3,6 @@ export interface ConsumerRecord {
     readonly topic: string;
     readonly partition: number;
     readonly offset: string;
-    /** Exclusive broker high-water offset captured with this delivery. */
-    readonly highWatermark: string;
     readonly key: Uint8Array | null;
     readonly value: Uint8Array | null;
     readonly headers: Readonly<Record<string, Uint8Array | string | undefined>>;
@@ -27,12 +25,15 @@ export interface Consumer {
         readonly eachMessage: (record: ConsumerRecord) => Promise<void>;
     }): Promise<void>;
     commitOffsets(offsets: readonly TopicPartitionOffset[]): Promise<void>;
-    /** Capture exclusive partition high-water offsets before live intake starts. */
-    highWaterMarks(topic: string): Promise<readonly {
+    /** Wait for paused assignment, then return broker bounds and current positions. */
+    assignedPartitions(topic: string): Promise<readonly {
         partition: number;
-        offset: string;
+        low: string;
+        high: string;
+        position: string;
     }[]>;
     seek(position: TopicPartitionOffset): void;
+    resume(topic: string, partitions: readonly number[]): void;
     stop(): Promise<void>;
     disconnect(): Promise<void>;
 }

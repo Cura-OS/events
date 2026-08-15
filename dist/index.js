@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DurableInboundConsumer = exports.subjectRightsEventDefinitions = exports.SubjectRightsStepCompletedEventSchema = exports.SubjectRightsRequestedEventSchema = exports.SubjectRightsExportReadyEventSchema = exports.SubjectRightsErasureRequestedEventSchema = exports.SubjectRightsErasureFailedEventSchema = exports.SubjectRightsErasureCompletedEventSchema = exports.SubjectRightsCapabilityManifestSchema = exports.SUBJECT_RIGHTS_STEP_COMPLETED_EVENT = exports.SUBJECT_RIGHTS_REQUESTED_EVENT = exports.SUBJECT_RIGHTS_EXPORT_READY_EVENT = exports.SUBJECT_RIGHTS_ERASURE_REQUESTED_EVENT = exports.SUBJECT_RIGHTS_ERASURE_FAILED_EVENT = exports.SUBJECT_RIGHTS_ERASURE_COMPLETED_EVENT = exports.SUBJECT_RIGHTS_EVENT_SCHEMA_VERSION = void 0;
+exports.subjectRightsEventDefinitions = exports.SubjectRightsStepCompletedEventSchema = exports.SubjectRightsRequestedEventSchema = exports.SubjectRightsExportReadyEventSchema = exports.SubjectRightsErasureRequestedEventSchema = exports.SubjectRightsErasureFailedEventSchema = exports.SubjectRightsErasureCompletedEventSchema = exports.SubjectRightsCapabilityManifestSchema = exports.SUBJECT_RIGHTS_STEP_COMPLETED_EVENT = exports.SUBJECT_RIGHTS_REQUESTED_EVENT = exports.SUBJECT_RIGHTS_EXPORT_READY_EVENT = exports.SUBJECT_RIGHTS_ERASURE_REQUESTED_EVENT = exports.SUBJECT_RIGHTS_ERASURE_FAILED_EVENT = exports.SUBJECT_RIGHTS_ERASURE_COMPLETED_EVENT = exports.SUBJECT_RIGHTS_EVENT_SCHEMA_VERSION = void 0;
 var subject_rights_1 = require("./subject-rights");
 Object.defineProperty(exports, "SUBJECT_RIGHTS_EVENT_SCHEMA_VERSION", { enumerable: true, get: function () { return subject_rights_1.SUBJECT_RIGHTS_EVENT_SCHEMA_VERSION; } });
 Object.defineProperty(exports, "SUBJECT_RIGHTS_ERASURE_COMPLETED_EVENT", { enumerable: true, get: function () { return subject_rights_1.SUBJECT_RIGHTS_ERASURE_COMPLETED_EVENT; } });
@@ -17,5 +17,3 @@ Object.defineProperty(exports, "SubjectRightsExportReadyEventSchema", { enumerab
 Object.defineProperty(exports, "SubjectRightsRequestedEventSchema", { enumerable: true, get: function () { return subject_rights_1.SubjectRightsRequestedEventSchema; } });
 Object.defineProperty(exports, "SubjectRightsStepCompletedEventSchema", { enumerable: true, get: function () { return subject_rights_1.SubjectRightsStepCompletedEventSchema; } });
 Object.defineProperty(exports, "subjectRightsEventDefinitions", { enumerable: true, get: function () { return subject_rights_1.subjectRightsEventDefinitions; } });
-var inbound_consumer_1 = require("./inbound-consumer");
-Object.defineProperty(exports, "DurableInboundConsumer", { enumerable: true, get: function () { return inbound_consumer_1.DurableInboundConsumer; } });

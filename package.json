@@ -16,6 +16,10 @@
       "import": "./dist/index.js",
       "require": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "node": "./dist/node.js"
     }
   },
   "files": [

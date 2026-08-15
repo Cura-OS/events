@@ -1,7 +1,20 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DurableInboundConsumer = void 0;
+const promises_1 = require("node:timers/promises");
 const nextOffset = (offset) => (BigInt(offset) + 1n).toString();
+const decode = new TextDecoder('utf-8', { fatal: true });
+const nonnegativeInteger = (name, value) => {
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+        throw new TypeError(`${name} must be a finite nonnegative integer`);
+    }
+    return value;
+};
+const positiveFinite = (name, value) => {
+    if (!Number.isFinite(value) || value <= 0)
+        throw new TypeError(`${name} must be finite and positive`);
+    return value;
+};
 const partitionKey = (record) => `${record.topic}:${record.partition}`;
 /**
  * Broker-neutral, at-least-once inbound orchestration.
@@ -34,42 +47,58 @@ class DurableInboundConsumer {
         this.handler = options.handler;
         this.offsets = options.offsets;
         this.deadLetters = options.deadLetters;
-        this.maxRetries = Math.max(0, options.maxRetries ?? 5);
-        this.baseBackoffMs = Math.max(1, options.baseBackoffMs ?? 100);
-        this.sleep = options.sleep ?? ((milliseconds) => Bun.sleep(milliseconds));
+        this.maxRetries = nonnegativeInteger('maxRetries', options.maxRetries ?? 5);
+        this.baseBackoffMs = positiveFinite('baseBackoffMs', options.baseBackoffMs ?? 100);
+        this.sleep = options.sleep ?? promises_1.setTimeout;
     }
     async start() {
         await this.consumer.connect();
         await this.consumer.subscribe({ topics: [this.topic], fromBeginning: false });
-        const checkpoints = await this.offsets.loadTopic(this.topic);
-        for (const checkpoint of checkpoints)
-            this.consumer.seek({ topic: this.topic, ...checkpoint });
-        const highWatermarks = await this.consumer.highWaterMarks(this.topic);
-        const durableOffsets = await Promise.all(highWatermarks.map(({ partition }) => this.offsets.load(this.topic, partition)));
-        for (const [index, highWatermark] of highWatermarks.entries()) {
-            const key = `${this.topic}:${highWatermark.partition}`;
-            this.bootHighWatermarks.set(key, BigInt(highWatermark.offset));
-            const checkpoint = durableOffsets[index];
-            if (checkpoint !== undefined && BigInt(checkpoint) >= BigInt(highWatermark.offset)) {
-                this.caughtPartitions.add(key);
-            }
-        }
-        if (this.bootHighWatermarks.size === this.caughtPartitions.size)
-            this.caughtUpResolve();
         this.accepting = true;
         await this.consumer.run({
             autoCommit: false,
             eachMessage: (record) => this.enqueue(record),
         });
+        const assignments = await this.consumer.assignedPartitions(this.topic);
+        const checkpoints = new Map((await this.offsets.loadTopic(this.topic)).map(({ partition, offset }) => [partition, offset]));
+        for (const assignment of assignments) {
+            const start = checkpoints.get(assignment.partition) ?? assignment.low;
+            this.consumer.seek({ topic: this.topic, partition: assignment.partition, offset: start });
+            const key = `${this.topic}:${assignment.partition}`;
+            this.bootHighWatermarks.set(key, BigInt(assignment.high));
+            if (BigInt(start) >= BigInt(assignment.high))
+                this.caughtPartitions.add(key);
+        }
+        if (this.bootHighWatermarks.size === this.caughtPartitions.size)
+            this.caughtUpResolve();
+        this.consumer.resume(this.topic, assignments.map(({ partition }) => partition));
     }
     caughtUp() {
         return this.caughtUpPromise;
     }
     async shutdown() {
         this.accepting = false;
-        await this.consumer.stop();
-        await Promise.all(this.partitions.values());
-        await this.consumer.disconnect();
+        let primary;
+        try {
+            try {
+                await this.consumer.stop();
+            }
+            catch (error) {
+                primary = error;
+            }
+            const results = await Promise.allSettled(this.partitions.values());
+            primary ??= results.find((result) => result.status === 'rejected')?.reason;
+        }
+        finally {
+            try {
+                await this.consumer.disconnect();
+            }
+            catch (error) {
+                primary ??= error;
+            }
+        }
+        if (primary !== undefined)
+            throw primary;
     }
     enqueue(record) {
         if (!this.accepting)
@@ -90,7 +119,7 @@ class DurableInboundConsumer {
         try {
             if (record.value === null)
                 throw new Error('record value is null');
-            parsed = this.schema.parse(JSON.parse(Buffer.from(record.value).toString('utf8')));
+            parsed = this.schema.parse(JSON.parse(decode.decode(record.value)));
         }
         catch (error) {
             await this.deadLetters.write({ record, reason: 'malformed', error });
