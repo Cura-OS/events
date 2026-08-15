@@ -50,6 +50,7 @@ class DurableInboundConsumer {
     rejectInitialAssignment;
     startPromise;
     shutdownPromise;
+    tornDown = false;
     catchUpSettled = false;
     caughtUpResolve;
     caughtUpReject;
@@ -118,8 +119,14 @@ class DurableInboundConsumer {
         }
         catch (error) {
             this.accepting = false;
+            this.closed = true;
+            this.assignmentEpoch += 1;
             this.rejectCatchUp(error);
-            const cleanupErrors = this.closed ? [] : await this.cleanup();
+            await this.assignmentTail;
+            if (this.tornDown)
+                throw error;
+            this.tornDown = true;
+            const cleanupErrors = await this.cleanup();
             throw this.withCleanup(error, cleanupErrors, 'consumer startup and cleanup failed');
         }
     }
@@ -129,15 +136,19 @@ class DurableInboundConsumer {
     }
     /** Stop intake, settle partition jobs, disconnect, then propagate the primary failure. */
     shutdown() {
-        return this.shutdownPromise ??= this.shutdownInternal();
+        if (this.shutdownPromise)
+            return this.shutdownPromise;
+        if (this.tornDown)
+            return Promise.resolve();
+        return this.shutdownPromise = this.shutdownInternal();
     }
     async shutdownInternal() {
+        this.tornDown = true;
         this.closed = true;
         this.accepting = false;
         this.assignmentEpoch += 1;
         this.rejectInitialAssignment?.(new Error('consumer shut down before initial assignment'));
         this.rejectCatchUp(new Error('consumer shut down before catch-up'));
-        await this.startPromise?.catch(() => { });
         const errors = [];
         try {
             await this.consumer.stop();
@@ -170,6 +181,7 @@ class DurableInboundConsumer {
         catch (error) {
             errors.push(error);
         }
+        this.tornDown = true;
         return errors;
     }
     withCleanup(primary, cleanupErrors, message) {

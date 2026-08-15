@@ -177,15 +177,14 @@ describe('DurableInboundConsumer', () => {
     expect(x.consumer.disconnects).toBe(1);
   });
 
-  test('shutdown during connect prevents later subscribe and run', async () => {
+  test('shutdown settles despite a stuck connect', async () => {
     let release!: () => void;
     const x = setup();
     x.consumer.connectGate = new Promise<void>((resolve) => { release = resolve; });
     const start = x.runtime.start();
     await Promise.resolve();
-    const shutdown = x.runtime.shutdown();
+    await x.runtime.shutdown();
     release();
-    await shutdown;
     await expect(start).rejects.toThrow('shut down');
     expect(x.consumer.subscribes).toBe(0);
     expect(x.consumer.runs).toBe(0);
@@ -487,6 +486,15 @@ describe('DurableInboundConsumer', () => {
     expect(x.consumer.disconnected).toBe(true);
     await expect(x.consumer.emit(record('0'))).rejects.toThrow('not initialized');
     expect(x.effects).toEqual([]);
+  });
+
+  test('failed startup does not repeat terminal cleanup on shutdown', async () => {
+    const x = setup();
+    x.consumer.assignmentError = new Error('assignment failed');
+    await expect(x.runtime.start()).rejects.toThrow('assignment failed');
+    await x.runtime.shutdown();
+    expect(x.consumer.stops).toBe(1);
+    expect(x.consumer.disconnects).toBe(1);
   });
 
   test('aggregates startup cleanup failures behind the primary error', async () => {

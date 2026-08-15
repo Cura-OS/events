@@ -109,6 +109,7 @@ export declare class DurableInboundConsumer<T = unknown> {
     private rejectInitialAssignment?;
     private startPromise?;
     private shutdownPromise?;
+    private tornDown;
     private catchUpSettled;
     private caughtUpResolve;
     private caughtUpReject;
