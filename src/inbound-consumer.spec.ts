@@ -34,8 +34,11 @@ class FakeConsumer implements Consumer {
   resumed = false;
   resumes: Array<{ topic: string; partitions: number[] }> = [];
   connects = 0;
-  async connect() { this.connects += 1; }
-  async subscribe() {}
+  subscribes = 0;
+  runs = 0;
+  connectGate?: Promise<void>;
+  async connect() { this.connects += 1; await this.connectGate; }
+  async subscribe() { this.subscribes += 1; }
   duringRun?: ConsumerRecord;
   duringRunResult?: Promise<void>;
   async run(config: {
@@ -44,6 +47,7 @@ class FakeConsumer implements Consumer {
     eachMessage(record: ConsumerRecord): Promise<void>;
     eachAssignment(assignments: typeof this.assignments): Promise<void>;
   }) {
+    this.runs += 1;
     expect(config).toMatchObject({ autoCommit: false, pauseOnAssignment: true });
     this.each = config.eachMessage;
     this.eachAssignment = config.eachAssignment;
@@ -140,12 +144,41 @@ describe('DurableInboundConsumer', () => {
     expect(second.effects).toEqual(['a']);
   });
 
+  test('shutdown during connect prevents later subscribe and run', async () => {
+    let release!: () => void;
+    const x = setup();
+    x.consumer.connectGate = new Promise<void>((resolve) => { release = resolve; });
+    const start = x.runtime.start();
+    await Promise.resolve();
+    await x.runtime.shutdown();
+    release();
+    await expect(start).rejects.toThrow('shut down');
+    expect(x.consumer.subscribes).toBe(0);
+    expect(x.consumer.runs).toBe(0);
+  });
+
   test('loads durable checkpoints and seeks before intake', async () => {
     const x = setup();
     x.offsets.values.set('avs.events:3', '9');
     x.consumer.assignments = [{ partition: 3, low: '0', high: '10', position: '10' }];
     await x.runtime.start();
     expect(x.consumer.seeks).toEqual([{ topic: 'avs.events', partition: 3, offset: '9' }]);
+  });
+
+  test('old delivery cannot resolve catch-up after a rebalance', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const x = setup({ handler: { async handle() { await pending; return 'ack'; } } });
+    await x.runtime.start();
+    const delivery = x.consumer.emit(record('1'));
+    const rebalance = x.consumer.rebalance([{ partition: 1, low: '0', high: '2', position: '2' }]);
+    const catchUp = x.runtime.caughtUp();
+    let caught = false;
+    void catchUp.then(() => { caught = true; });
+    release();
+    await Promise.all([delivery, rebalance]);
+    await Promise.resolve();
+    expect(caught).toBe(false);
   });
 
   test('only the latest overlapping rebalance seeks and resumes', async () => {
@@ -211,6 +244,15 @@ describe('DurableInboundConsumer', () => {
     const x = setup();
     await x.runtime.start();
     await expect(x.consumer.emit(item)).rejects.toThrow('topic or partition');
+    expect(x.effects).toEqual([]);
+    expect(x.dead).toEqual([]);
+    expect(x.consumer.commits).toEqual([]);
+  });
+
+  test('rejects delivery from a partition outside the current assignment', async () => {
+    const x = setup();
+    await x.runtime.start();
+    await expect(x.consumer.emit(record('0', 1))).rejects.toThrow('not assigned');
     expect(x.effects).toEqual([]);
     expect(x.dead).toEqual([]);
     expect(x.consumer.commits).toEqual([]);

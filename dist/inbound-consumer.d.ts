@@ -100,6 +100,7 @@ export declare class DurableInboundConsumer<T = unknown> {
     private readonly partitions;
     private readonly bootHighWatermarks;
     private readonly caughtPartitions;
+    private readonly assignedPartitions;
     private accepting;
     private closed;
     private assignmentEpoch;

@@ -41,6 +41,7 @@ class DurableInboundConsumer {
     partitions = new Map();
     bootHighWatermarks = new Map();
     caughtPartitions = new Set();
+    assignedPartitions = new Set();
     accepting = false;
     closed = false;
     assignmentEpoch = 0;
@@ -72,6 +73,8 @@ class DurableInboundConsumer {
             throw new Error('consumer has shut down');
         try {
             await this.consumer.connect();
+            if (this.closed)
+                throw new Error('consumer has shut down');
             await this.consumer.subscribe({ topics: [this.topic], fromBeginning: false });
             await this.consumer.run({
                 autoCommit: false,
@@ -153,6 +156,10 @@ class DurableInboundConsumer {
         if (this.closed)
             return Promise.resolve();
         const epoch = ++this.assignmentEpoch;
+        this.accepting = false;
+        this.bootHighWatermarks.clear();
+        this.caughtPartitions.clear();
+        this.assignedPartitions.clear();
         if (epoch > 1) {
             this.rejectCatchUp(new Error('assignment replaced before catch-up'));
             this.resetCatchUp();
@@ -206,12 +213,11 @@ class DurableInboundConsumer {
             });
             if (epoch !== this.assignmentEpoch || this.closed)
                 return;
-            this.bootHighWatermarks.clear();
-            this.caughtPartitions.clear();
             for (const { partition, high, start } of initialized) {
                 const offset = start.toString();
                 this.consumer.seek({ topic: this.topic, partition, offset });
                 const key = `${this.topic}:${partition}`;
+                this.assignedPartitions.add(partition);
                 this.bootHighWatermarks.set(key, high);
                 if (start === high)
                     this.caughtPartitions.add(key);
@@ -234,6 +240,9 @@ class DurableInboundConsumer {
             return Promise.reject(new Error('inbound consumer is not initialized'));
         if (record.topic !== this.topic || !Number.isSafeInteger(record.partition) || record.partition < 0) {
             return Promise.reject(new RangeError('record topic or partition is invalid'));
+        }
+        if (!this.assignedPartitions.has(record.partition)) {
+            return Promise.reject(new RangeError('record partition is not assigned'));
         }
         const key = partitionKey(record);
         const pending = (this.partitions.get(key) ?? Promise.resolve()).then(() => this.process(record));

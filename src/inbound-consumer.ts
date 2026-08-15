@@ -126,6 +126,7 @@ export class DurableInboundConsumer<T = unknown> {
   private readonly partitions = new Map<string, Promise<void>>();
   private readonly bootHighWatermarks = new Map<string, bigint>();
   private readonly caughtPartitions = new Set<string>();
+  private readonly assignedPartitions = new Set<number>();
   private accepting = false;
   private closed = false;
   private assignmentEpoch = 0;
@@ -158,6 +159,7 @@ export class DurableInboundConsumer<T = unknown> {
     if (this.closed) throw new Error('consumer has shut down');
     try {
       await this.consumer.connect();
+      if (this.closed) throw new Error('consumer has shut down');
       await this.consumer.subscribe({ topics: [this.topic], fromBeginning: false });
       await this.consumer.run({
         autoCommit: false,
@@ -224,6 +226,10 @@ export class DurableInboundConsumer<T = unknown> {
   private enqueueAssignments(assignments: readonly ConsumerAssignment[]): Promise<void> {
     if (this.closed) return Promise.resolve();
     const epoch = ++this.assignmentEpoch;
+    this.accepting = false;
+    this.bootHighWatermarks.clear();
+    this.caughtPartitions.clear();
+    this.assignedPartitions.clear();
     if (epoch > 1) {
       this.rejectCatchUp(new Error('assignment replaced before catch-up'));
       this.resetCatchUp();
@@ -283,12 +289,11 @@ export class DurableInboundConsumer<T = unknown> {
         return { partition: assignment.partition, high, start };
       });
       if (epoch !== this.assignmentEpoch || this.closed) return;
-      this.bootHighWatermarks.clear();
-      this.caughtPartitions.clear();
       for (const { partition, high, start } of initialized) {
         const offset = start.toString();
         this.consumer.seek({ topic: this.topic, partition, offset });
         const key = `${this.topic}:${partition}`;
+        this.assignedPartitions.add(partition);
         this.bootHighWatermarks.set(key, high);
         if (start === high) this.caughtPartitions.add(key);
       }
@@ -306,6 +311,9 @@ export class DurableInboundConsumer<T = unknown> {
     if (!this.accepting) return Promise.reject(new Error('inbound consumer is not initialized'));
     if (record.topic !== this.topic || !Number.isSafeInteger(record.partition) || record.partition < 0) {
       return Promise.reject(new RangeError('record topic or partition is invalid'));
+    }
+    if (!this.assignedPartitions.has(record.partition)) {
+      return Promise.reject(new RangeError('record partition is not assigned'));
     }
     const key = partitionKey(record);
     const pending = (this.partitions.get(key) ?? Promise.resolve()).then(() =>
