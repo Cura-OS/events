@@ -37,8 +37,11 @@ class FakeConsumer implements Consumer {
   subscribes = 0;
   runs = 0;
   connectGate?: Promise<void>;
+  subscribeGate?: Promise<void>;
+  subscribeEntered?: () => void;
+  awaitAssignmentCallbacks = true;
   async connect() { this.connects += 1; await this.connectGate; }
-  async subscribe() { this.subscribes += 1; }
+  async subscribe() { this.subscribes += 1; this.subscribeEntered?.(); await this.subscribeGate; }
   duringRun?: ConsumerRecord;
   duringRunResult?: Promise<void>;
   async run(config: {
@@ -56,7 +59,9 @@ class FakeConsumer implements Consumer {
       void this.duringRunResult.catch(() => {});
     }
     await this.assignmentFailure();
-    await config.eachAssignment(this.assignments);
+    const assignment = config.eachAssignment(this.assignments);
+    if (this.awaitAssignmentCallbacks) await assignment;
+    else void assignment.catch(() => {});
   }
   async commitOffsets(offsets: Array<{ topic: string; partition: number; offset: string }>) {
     if (this.commitError) throw this.commitError;
@@ -157,6 +162,21 @@ describe('DurableInboundConsumer', () => {
     expect(x.consumer.runs).toBe(0);
   });
 
+  test('shutdown during subscribe prevents later run', async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const x = setup();
+    x.consumer.subscribeGate = new Promise<void>((resolve) => { release = resolve; });
+    const subscribed = new Promise<void>((resolve) => { entered = resolve; });
+    x.consumer.subscribeEntered = entered;
+    const start = x.runtime.start();
+    await subscribed;
+    await x.runtime.shutdown();
+    release();
+    await expect(start).rejects.toThrow('shut down');
+    expect(x.consumer.runs).toBe(0);
+  });
+
   test('loads durable checkpoints and seeks before intake', async () => {
     const x = setup();
     x.offsets.values.set('avs.events:3', '9');
@@ -223,6 +243,15 @@ describe('DurableInboundConsumer', () => {
     const x = setup();
     x.consumer.assignments = [assignment];
     await expect(x.runtime.start()).rejects.toThrow('broker bounds');
+  });
+
+  test('waits for a rejected initial assignment before resolving startup', async () => {
+    const x = setup();
+    x.consumer.awaitAssignmentCallbacks = false;
+    x.consumer.assignments = [{ partition: -1, low: '0', high: '0', position: '0' }];
+    await expect(x.runtime.start()).rejects.toThrow('partition');
+    expect(x.consumer.stopped).toBe(true);
+    expect(x.consumer.disconnected).toBe(true);
   });
 
   test('validates every assignment before seeking or resuming', async () => {

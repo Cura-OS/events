@@ -76,12 +76,32 @@ class DurableInboundConsumer {
             if (this.closed)
                 throw new Error('consumer has shut down');
             await this.consumer.subscribe({ topics: [this.topic], fromBeginning: false });
+            if (this.closed)
+                throw new Error('consumer has shut down');
+            let resolveInitialAssignment;
+            let rejectInitialAssignment;
+            const initialAssignment = new Promise((resolve, reject) => {
+                resolveInitialAssignment = resolve;
+                rejectInitialAssignment = reject;
+            });
+            void initialAssignment.catch(() => { });
+            let awaitingInitialAssignment = true;
             await this.consumer.run({
                 autoCommit: false,
                 pauseOnAssignment: true,
                 eachMessage: (record) => this.enqueue(record),
-                eachAssignment: (assignments) => this.enqueueAssignments(assignments),
+                eachAssignment: (assignments) => {
+                    const pending = this.enqueueAssignments(assignments);
+                    if (awaitingInitialAssignment) {
+                        awaitingInitialAssignment = false;
+                        void pending.then(resolveInitialAssignment, rejectInitialAssignment);
+                    }
+                    return pending;
+                },
             });
+            await initialAssignment;
+            if (this.closed)
+                throw new Error('consumer has shut down');
         }
         catch (error) {
             this.accepting = false;
