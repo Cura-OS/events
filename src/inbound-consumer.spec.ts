@@ -36,6 +36,10 @@ class FakeConsumer implements Consumer {
   connects = 0;
   subscribes = 0;
   runs = 0;
+  runEntered?: () => void;
+  emitInitialAssignment = true;
+  stops = 0;
+  disconnects = 0;
   connectGate?: Promise<void>;
   subscribeGate?: Promise<void>;
   subscribeEntered?: () => void;
@@ -51,6 +55,7 @@ class FakeConsumer implements Consumer {
     eachAssignment(assignments: typeof this.assignments): Promise<void>;
   }) {
     this.runs += 1;
+    this.runEntered?.();
     expect(config).toMatchObject({ autoCommit: false, pauseOnAssignment: true });
     this.each = config.eachMessage;
     this.eachAssignment = config.eachAssignment;
@@ -59,9 +64,11 @@ class FakeConsumer implements Consumer {
       void this.duringRunResult.catch(() => {});
     }
     await this.assignmentFailure();
-    const assignment = config.eachAssignment(this.assignments);
-    if (this.awaitAssignmentCallbacks) await assignment;
-    else void assignment.catch(() => {});
+    if (this.emitInitialAssignment) {
+      const assignment = config.eachAssignment(this.assignments);
+      if (this.awaitAssignmentCallbacks) await assignment;
+      else void assignment.catch(() => {});
+    }
   }
   async commitOffsets(offsets: Array<{ topic: string; partition: number; offset: string }>) {
     if (this.commitError) throw this.commitError;
@@ -83,8 +90,8 @@ class FakeConsumer implements Consumer {
   }
   stopError?: Error;
   disconnectError?: Error;
-  async stop() { this.stopped = true; if (this.stopError) throw this.stopError; }
-  async disconnect() { this.disconnected = true; if (this.disconnectError) throw this.disconnectError; }
+  async stop() { this.stopped = true; this.stops += 1; if (this.stopError) throw this.stopError; }
+  async disconnect() { this.disconnected = true; this.disconnects += 1; if (this.disconnectError) throw this.disconnectError; }
   emit(value: ConsumerRecord) { return this.each!(value); }
 }
 
@@ -175,6 +182,20 @@ describe('DurableInboundConsumer', () => {
     release();
     await expect(start).rejects.toThrow('shut down');
     expect(x.consumer.runs).toBe(0);
+  });
+
+  test('shutdown settles startup waiting for its initial assignment once', async () => {
+    let entered!: () => void;
+    const x = setup();
+    x.consumer.emitInitialAssignment = false;
+    const running = new Promise<void>((resolve) => { entered = resolve; });
+    x.consumer.runEntered = entered;
+    const start = x.runtime.start();
+    await running;
+    await x.runtime.shutdown();
+    await expect(start).rejects.toThrow('shut down before initial assignment');
+    expect(x.consumer.stops).toBe(1);
+    expect(x.consumer.disconnects).toBe(1);
   });
 
   test('loads durable checkpoints and seeks before intake', async () => {

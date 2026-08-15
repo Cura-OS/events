@@ -106,6 +106,7 @@ export declare class DurableInboundConsumer<T = unknown> {
     private assignmentEpoch;
     private assignmentTail;
     private readonly assignmentFailures;
+    private rejectInitialAssignment?;
     private catchUpSettled;
     private caughtUpResolve;
     private caughtUpReject;

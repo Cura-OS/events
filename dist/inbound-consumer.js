@@ -47,6 +47,7 @@ class DurableInboundConsumer {
     assignmentEpoch = 0;
     assignmentTail = Promise.resolve();
     assignmentFailures = [];
+    rejectInitialAssignment;
     catchUpSettled = false;
     caughtUpResolve;
     caughtUpReject;
@@ -84,29 +85,35 @@ class DurableInboundConsumer {
                 resolveInitialAssignment = resolve;
                 rejectInitialAssignment = reject;
             });
+            this.rejectInitialAssignment = rejectInitialAssignment;
             void initialAssignment.catch(() => { });
             let awaitingInitialAssignment = true;
-            await this.consumer.run({
-                autoCommit: false,
-                pauseOnAssignment: true,
-                eachMessage: (record) => this.enqueue(record),
-                eachAssignment: (assignments) => {
-                    const pending = this.enqueueAssignments(assignments);
-                    if (awaitingInitialAssignment) {
-                        awaitingInitialAssignment = false;
-                        void pending.then(resolveInitialAssignment, rejectInitialAssignment);
-                    }
-                    return pending;
-                },
-            });
-            await initialAssignment;
-            if (this.closed)
-                throw new Error('consumer has shut down');
+            try {
+                await this.consumer.run({
+                    autoCommit: false,
+                    pauseOnAssignment: true,
+                    eachMessage: (record) => this.enqueue(record),
+                    eachAssignment: (assignments) => {
+                        const pending = this.enqueueAssignments(assignments);
+                        if (awaitingInitialAssignment) {
+                            awaitingInitialAssignment = false;
+                            void pending.then(resolveInitialAssignment, rejectInitialAssignment);
+                        }
+                        return pending;
+                    },
+                });
+                await initialAssignment;
+                if (this.closed)
+                    throw new Error('consumer has shut down');
+            }
+            finally {
+                this.rejectInitialAssignment = undefined;
+            }
         }
         catch (error) {
             this.accepting = false;
             this.rejectCatchUp(error);
-            const cleanupErrors = await this.cleanup();
+            const cleanupErrors = this.closed ? [] : await this.cleanup();
             throw this.withCleanup(error, cleanupErrors, 'consumer startup and cleanup failed');
         }
     }
@@ -119,6 +126,7 @@ class DurableInboundConsumer {
         this.closed = true;
         this.accepting = false;
         this.assignmentEpoch += 1;
+        this.rejectInitialAssignment?.(new Error('consumer shut down before initial assignment'));
         this.rejectCatchUp(new Error('consumer shut down before catch-up'));
         const errors = [];
         try {
