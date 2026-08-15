@@ -127,8 +127,10 @@ export class DurableInboundConsumer<T = unknown> {
   private readonly bootHighWatermarks = new Map<string, bigint>();
   private readonly caughtPartitions = new Set<string>();
   private accepting = false;
+  private closed = false;
   private assignmentEpoch = 0;
   private assignmentTail: Promise<void> = Promise.resolve();
+  private readonly assignmentFailures: unknown[] = [];
   private catchUpSettled = false;
   private caughtUpResolve!: () => void;
   private caughtUpReject!: (error: unknown) => void;
@@ -177,13 +179,14 @@ export class DurableInboundConsumer<T = unknown> {
 
   /** Stop intake, settle partition jobs, disconnect, then propagate the primary failure. */
   async shutdown(): Promise<void> {
+    this.closed = true;
     this.accepting = false;
     this.assignmentEpoch += 1;
     this.rejectCatchUp(new Error('consumer shut down before catch-up'));
     const errors: unknown[] = [];
     try { await this.consumer.stop(); } catch (error) { errors.push(error); }
     await this.assignmentTail;
-    errors.push(...await this.cleanup(false));
+    errors.push(...this.assignmentFailures, ...await this.cleanup(false));
     if (errors.length > 0) throw this.withCleanup(errors[0], errors.slice(1), 'consumer shutdown failed');
   }
 
@@ -218,13 +221,14 @@ export class DurableInboundConsumer<T = unknown> {
   }
 
   private enqueueAssignments(assignments: readonly ConsumerAssignment[]): Promise<void> {
+    if (this.closed) return Promise.resolve();
     const epoch = ++this.assignmentEpoch;
     if (epoch > 1) {
       this.rejectCatchUp(new Error('assignment replaced before catch-up'));
       this.resetCatchUp();
     }
     const pending = this.assignmentTail.then(() => this.initializeAssignments(assignments, epoch));
-    this.assignmentTail = pending.catch(() => {});
+    this.assignmentTail = pending.catch((error) => { this.assignmentFailures.push(error); });
     return pending;
   }
 
@@ -240,13 +244,19 @@ export class DurableInboundConsumer<T = unknown> {
         if (rejected?.status === 'rejected') throw rejected.reason;
         if (epoch !== this.assignmentEpoch) return;
       }
+      const partitions = new Set<number>();
+      for (const assignment of assignments) {
+        nonnegativeInteger('assignment partition', assignment.partition);
+        if (partitions.has(assignment.partition)) {
+          throw new RangeError(`duplicate assignment partition ${assignment.partition}`);
+        }
+        partitions.add(assignment.partition);
+      }
       const checkpoints = new Map(
         (await this.offsets.loadTopic(this.topic)).map(({ partition, offset }) => [partition, offset]),
       );
-      if (epoch !== this.assignmentEpoch) return;
-      this.bootHighWatermarks.clear();
-      this.caughtPartitions.clear();
-      for (const assignment of assignments) {
+      if (epoch !== this.assignmentEpoch || this.closed) return;
+      const initialized = assignments.map((assignment) => {
         let low: bigint;
         let high: bigint;
         let position: bigint;
@@ -269,15 +279,22 @@ export class DurableInboundConsumer<T = unknown> {
         ) {
           throw new RangeError(`checkpoint is outside broker bounds for partition ${assignment.partition}`);
         }
+        return { partition: assignment.partition, high, start };
+      });
+      if (epoch !== this.assignmentEpoch || this.closed) return;
+      this.bootHighWatermarks.clear();
+      this.caughtPartitions.clear();
+      for (const { partition, high, start } of initialized) {
         const offset = start.toString();
-        this.consumer.seek({ topic: this.topic, partition: assignment.partition, offset });
-        const key = `${this.topic}:${assignment.partition}`;
+        this.consumer.seek({ topic: this.topic, partition, offset });
+        const key = `${this.topic}:${partition}`;
         this.bootHighWatermarks.set(key, high);
         if (start === high) this.caughtPartitions.add(key);
       }
       if (this.bootHighWatermarks.size === this.caughtPartitions.size) this.caughtUpResolve();
+      if (epoch !== this.assignmentEpoch || this.closed) return;
       this.accepting = true;
-      this.consumer.resume(this.topic, assignments.map(({ partition }) => partition));
+      this.consumer.resume(this.topic, initialized.map(({ partition }) => partition));
     } catch (error) {
       if (epoch === this.assignmentEpoch) {
         this.rejectCatchUp(error);
@@ -288,6 +305,9 @@ export class DurableInboundConsumer<T = unknown> {
 
   private enqueue(record: ConsumerRecord): Promise<void> {
     if (!this.accepting) return Promise.reject(new Error('inbound consumer is not initialized'));
+    if (record.topic !== this.topic || !Number.isSafeInteger(record.partition) || record.partition < 0) {
+      return Promise.reject(new RangeError('record topic or partition is invalid'));
+    }
     const key = partitionKey(record);
     const pending = (this.partitions.get(key) ?? Promise.resolve()).then(() =>
       this.process(record),

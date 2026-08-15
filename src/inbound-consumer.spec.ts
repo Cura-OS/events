@@ -191,6 +191,30 @@ describe('DurableInboundConsumer', () => {
     await expect(x.runtime.start()).rejects.toThrow('broker bounds');
   });
 
+  test('validates every assignment before seeking or resuming', async () => {
+    const x = setup();
+    x.consumer.assignments = [
+      { partition: 1, low: '0', high: '1', position: '1' },
+      { partition: Number.NaN, low: '0', high: '1', position: '1' },
+    ];
+    await expect(x.runtime.start()).rejects.toThrow('partition');
+    expect(x.consumer.seeks).toEqual([]);
+    expect(x.consumer.resumes).toEqual([]);
+  });
+
+  test.each([
+    { ...record('0'), topic: 'other.events' },
+    { ...record('0'), partition: -1 },
+    { ...record('0'), partition: Number.POSITIVE_INFINITY },
+  ])('rejects records outside the subscribed topic and partitions', async (item) => {
+    const x = setup();
+    await x.runtime.start();
+    await expect(x.consumer.emit(item)).rejects.toThrow('topic or partition');
+    expect(x.effects).toEqual([]);
+    expect(x.dead).toEqual([]);
+    expect(x.consumer.commits).toEqual([]);
+  });
+
   test('isolates partition ordering', async () => {
     let release!: () => void;
     const first = new Promise<void>((resolve) => { release = resolve; });
@@ -392,6 +416,17 @@ describe('DurableInboundConsumer', () => {
     expect(x.consumer.disconnected).toBe(true);
   });
 
+  test('post-shutdown assignment callbacks are no-ops after disconnect', async () => {
+    const x = setup();
+    await x.runtime.start();
+    x.consumer.seeks = [];
+    x.consumer.resumes = [];
+    await x.runtime.shutdown();
+    await x.consumer.rebalance([{ partition: 2, low: '0', high: '0', position: '0' }]);
+    expect(x.consumer.seeks).toEqual([]);
+    expect(x.consumer.resumes).toEqual([]);
+  });
+
   test('stale assignment failure cannot reject the newer catch-up promise', async () => {
     let rejectFirst!: (error: Error) => void;
     let enteredFirst!: () => void;
@@ -434,6 +469,15 @@ describe('DurableInboundConsumer', () => {
       ]);
     }
     await expect(delivery).rejects.toThrow('checkpoint unavailable');
+    expect(x.consumer.disconnected).toBe(true);
+  });
+
+  test('includes rebalance failure in shutdown errors', async () => {
+    const x = setup();
+    await x.runtime.start();
+    const rebalance = x.consumer.rebalance([{ partition: -1, low: '0', high: '0', position: '0' }]);
+    await expect(rebalance).rejects.toThrow('partition');
+    await expect(x.runtime.shutdown()).rejects.toThrow('partition');
     expect(x.consumer.disconnected).toBe(true);
   });
 

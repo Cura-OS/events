@@ -101,8 +101,10 @@ export declare class DurableInboundConsumer<T = unknown> {
     private readonly bootHighWatermarks;
     private readonly caughtPartitions;
     private accepting;
+    private closed;
     private assignmentEpoch;
     private assignmentTail;
+    private readonly assignmentFailures;
     private catchUpSettled;
     private caughtUpResolve;
     private caughtUpReject;
