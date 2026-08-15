@@ -38,6 +38,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "check:dist": "bun run build && git diff --exit-code -- dist",
     "lint": "oxlint .",
     "test": "bun test",
     "test:coverage": "bun test --coverage",

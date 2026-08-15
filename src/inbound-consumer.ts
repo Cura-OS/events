@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { z } from 'zod';
 
+/** Broker delivery passed to a durable inbound handler. */
 export interface ConsumerRecord {
   readonly topic: string;
   readonly partition: number;
@@ -10,6 +11,7 @@ export interface ConsumerRecord {
   readonly headers: Readonly<Record<string, Uint8Array | string | undefined>>;
 }
 
+/** Broker position represented as the next offset to consume. */
 export interface TopicPartitionOffset {
   readonly topic: string;
   readonly partition: number;
@@ -23,6 +25,8 @@ export interface Consumer {
   subscribe(config: { readonly topics: readonly string[]; readonly fromBeginning: boolean }): Promise<void>;
   run(config: {
     readonly autoCommit: false;
+    /** Keep newly assigned partitions paused until explicit resume. */
+    readonly pauseOnAssignment: true;
     readonly eachMessage: (record: ConsumerRecord) => Promise<void>;
   }): Promise<void>;
   commitOffsets(offsets: readonly TopicPartitionOffset[]): Promise<void>;
@@ -39,13 +43,16 @@ export interface Consumer {
   disconnect(): Promise<void>;
 }
 
+/** Handler result controlling acknowledgement, retry, or durable rejection. */
 export type InboundDisposition = 'ack' | 'retry' | 'dead-letter';
 
+/** Durable domain-effect port invoked for a validated delivery. */
 export interface InboundHandler<T> {
   /** Complete the durable domain effect before returning ack. */
   handle(value: T, record: ConsumerRecord): Promise<InboundDisposition>;
 }
 
+/** Durable next-offset checkpoint store. */
 export interface OffsetStore {
   load(topic: string, partition: number): Promise<string | undefined>;
   loadTopic(topic: string): Promise<readonly { partition: number; offset: string }[]>;
@@ -53,6 +60,7 @@ export interface OffsetStore {
   save(topic: string, partition: number, nextOffset: string): Promise<void>;
 }
 
+/** Durable sink for malformed or rejected deliveries. */
 export interface DeadLetterSink {
   /** Durably persist the poison record before resolving. */
   write(entry: {
@@ -62,6 +70,7 @@ export interface DeadLetterSink {
   }): Promise<void>;
 }
 
+/** Dependencies and bounded retry policy for a durable consumer. */
 export interface DurableInboundConsumerOptions<T> {
   readonly consumer: Consumer;
   readonly topic: string;
@@ -74,16 +83,19 @@ export interface DurableInboundConsumerOptions<T> {
   readonly sleep?: (milliseconds: number) => Promise<void>;
 }
 
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const nextOffset = (offset: string): string => (BigInt(offset) + 1n).toString();
 const decode = new TextDecoder('utf-8', { fatal: true });
 const nonnegativeInteger = (name: string, value: number): number => {
-  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
-    throw new TypeError(`${name} must be a finite nonnegative integer`);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${name} must be a safe nonnegative integer`);
   }
   return value;
 };
-const positiveFinite = (name: string, value: number): number => {
-  if (!Number.isFinite(value) || value <= 0) throw new TypeError(`${name} must be finite and positive`);
+const positiveInteger = (name: string, value: number): number => {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${name} must be a safe positive integer`);
+  }
   return value;
 };
 const partitionKey = (record: Pick<ConsumerRecord, 'topic' | 'partition'>) =>
@@ -122,37 +134,53 @@ export class DurableInboundConsumer<T = unknown> {
     this.offsets = options.offsets;
     this.deadLetters = options.deadLetters;
     this.maxRetries = nonnegativeInteger('maxRetries', options.maxRetries ?? 5);
-    this.baseBackoffMs = positiveFinite('baseBackoffMs', options.baseBackoffMs ?? 100);
+    this.baseBackoffMs = positiveInteger('baseBackoffMs', options.baseBackoffMs ?? 100);
+    const maximumDelay = this.baseBackoffMs * 2 ** Math.max(0, this.maxRetries - 1);
+    if (maximumDelay > MAX_TIMER_DELAY_MS) {
+      throw new RangeError('maximum retry delay exceeds the Node timer range');
+    }
     this.sleep = options.sleep ?? sleep;
   }
 
+  /** Connect, initialize paused assignments, seek durable starts, then resume intake. */
   async start(): Promise<void> {
-    await this.consumer.connect();
-    await this.consumer.subscribe({ topics: [this.topic], fromBeginning: false });
-    this.accepting = true;
-    await this.consumer.run({
-      autoCommit: false,
-      eachMessage: (record) => this.enqueue(record),
-    });
-    const assignments = await this.consumer.assignedPartitions(this.topic);
-    const checkpoints = new Map(
-      (await this.offsets.loadTopic(this.topic)).map(({ partition, offset }) => [partition, offset]),
-    );
-    for (const assignment of assignments) {
-      const start = checkpoints.get(assignment.partition) ?? assignment.low;
-      this.consumer.seek({ topic: this.topic, partition: assignment.partition, offset: start });
-      const key = `${this.topic}:${assignment.partition}`;
-      this.bootHighWatermarks.set(key, BigInt(assignment.high));
-      if (BigInt(start) >= BigInt(assignment.high)) this.caughtPartitions.add(key);
+    try {
+      await this.consumer.connect();
+      await this.consumer.subscribe({ topics: [this.topic], fromBeginning: false });
+      await this.consumer.run({
+        autoCommit: false,
+        pauseOnAssignment: true,
+        eachMessage: (record) => this.enqueue(record),
+      });
+      const assignments = await this.consumer.assignedPartitions(this.topic);
+      const checkpoints = new Map(
+        (await this.offsets.loadTopic(this.topic)).map(({ partition, offset }) => [partition, offset]),
+      );
+      for (const assignment of assignments) {
+        const start = checkpoints.get(assignment.partition) ?? assignment.low;
+        this.consumer.seek({ topic: this.topic, partition: assignment.partition, offset: start });
+        const key = `${this.topic}:${assignment.partition}`;
+        this.bootHighWatermarks.set(key, BigInt(assignment.high));
+        if (BigInt(start) >= BigInt(assignment.high)) this.caughtPartitions.add(key);
+      }
+      if (this.bootHighWatermarks.size === this.caughtPartitions.size) this.caughtUpResolve();
+      this.accepting = true;
+      this.consumer.resume(this.topic, assignments.map(({ partition }) => partition));
+    } catch (error) {
+      this.accepting = false;
+      try { await this.consumer.stop(); } catch {}
+      await Promise.allSettled(this.partitions.values());
+      try { await this.consumer.disconnect(); } catch {}
+      throw error;
     }
-    if (this.bootHighWatermarks.size === this.caughtPartitions.size) this.caughtUpResolve();
-    this.consumer.resume(this.topic, assignments.map(({ partition }) => partition));
   }
 
+  /** Resolve once every boot-time partition high watermark is checkpointed. */
   caughtUp(): Promise<void> {
     return this.caughtUpPromise;
   }
 
+  /** Stop intake, settle partition jobs, disconnect, then propagate the primary failure. */
   async shutdown(): Promise<void> {
     this.accepting = false;
     let primary: unknown;
@@ -175,7 +203,7 @@ export class DurableInboundConsumer<T = unknown> {
   }
 
   private enqueue(record: ConsumerRecord): Promise<void> {
-    if (!this.accepting) return Promise.reject(new Error('inbound consumer is stopping'));
+    if (!this.accepting) return Promise.reject(new Error('inbound consumer is not initialized'));
     const key = partitionKey(record);
     const pending = (this.partitions.get(key) ?? Promise.resolve()).then(() =>
       this.process(record),

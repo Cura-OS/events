@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+/** Broker delivery passed to a durable inbound handler. */
 export interface ConsumerRecord {
     readonly topic: string;
     readonly partition: number;
@@ -7,6 +8,7 @@ export interface ConsumerRecord {
     readonly value: Uint8Array | null;
     readonly headers: Readonly<Record<string, Uint8Array | string | undefined>>;
 }
+/** Broker position represented as the next offset to consume. */
 export interface TopicPartitionOffset {
     readonly topic: string;
     readonly partition: number;
@@ -22,6 +24,8 @@ export interface Consumer {
     }): Promise<void>;
     run(config: {
         readonly autoCommit: false;
+        /** Keep newly assigned partitions paused until explicit resume. */
+        readonly pauseOnAssignment: true;
         readonly eachMessage: (record: ConsumerRecord) => Promise<void>;
     }): Promise<void>;
     commitOffsets(offsets: readonly TopicPartitionOffset[]): Promise<void>;
@@ -37,11 +41,14 @@ export interface Consumer {
     stop(): Promise<void>;
     disconnect(): Promise<void>;
 }
+/** Handler result controlling acknowledgement, retry, or durable rejection. */
 export type InboundDisposition = 'ack' | 'retry' | 'dead-letter';
+/** Durable domain-effect port invoked for a validated delivery. */
 export interface InboundHandler<T> {
     /** Complete the durable domain effect before returning ack. */
     handle(value: T, record: ConsumerRecord): Promise<InboundDisposition>;
 }
+/** Durable next-offset checkpoint store. */
 export interface OffsetStore {
     load(topic: string, partition: number): Promise<string | undefined>;
     loadTopic(topic: string): Promise<readonly {
@@ -51,6 +58,7 @@ export interface OffsetStore {
     /** Durably checkpoint the next offset only after the handler effect completes. */
     save(topic: string, partition: number, nextOffset: string): Promise<void>;
 }
+/** Durable sink for malformed or rejected deliveries. */
 export interface DeadLetterSink {
     /** Durably persist the poison record before resolving. */
     write(entry: {
@@ -59,6 +67,7 @@ export interface DeadLetterSink {
         readonly error?: unknown;
     }): Promise<void>;
 }
+/** Dependencies and bounded retry policy for a durable consumer. */
 export interface DurableInboundConsumerOptions<T> {
     readonly consumer: Consumer;
     readonly topic: string;
@@ -93,8 +102,11 @@ export declare class DurableInboundConsumer<T = unknown> {
     private caughtUpResolve;
     private readonly caughtUpPromise;
     constructor(options: DurableInboundConsumerOptions<T>);
+    /** Connect, initialize paused assignments, seek durable starts, then resume intake. */
     start(): Promise<void>;
+    /** Resolve once every boot-time partition high watermark is checkpointed. */
     caughtUp(): Promise<void>;
+    /** Stop intake, settle partition jobs, disconnect, then propagate the primary failure. */
     shutdown(): Promise<void>;
     private enqueue;
     private process;

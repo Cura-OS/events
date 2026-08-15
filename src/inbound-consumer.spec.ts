@@ -5,7 +5,7 @@ import {
   type Consumer,
   type ConsumerRecord,
   type OffsetStore,
-} from '../src/node';
+} from './node';
 
 const schema = z.object({ id: z.string() });
 const record = (
@@ -28,22 +28,37 @@ class FakeConsumer implements Consumer {
   stopped = false;
   disconnected = false;
   assignments = [{ partition: 0, low: '0', high: '2', position: '2' }];
+  assignmentError?: Error;
   commitError?: Error;
+  resumed = false;
   async connect() {}
   async subscribe() {}
-  async run(config: { autoCommit: false; eachMessage(record: ConsumerRecord): Promise<void> }) {
-    expect(config.autoCommit).toBe(false);
+  duringRun?: ConsumerRecord;
+  duringRunResult?: Promise<void>;
+  async run(config: {
+    autoCommit: false;
+    pauseOnAssignment: true;
+    eachMessage(record: ConsumerRecord): Promise<void>;
+  }) {
+    expect(config).toMatchObject({ autoCommit: false, pauseOnAssignment: true });
     this.each = config.eachMessage;
+    if (this.duringRun) {
+      this.duringRunResult = config.eachMessage(this.duringRun);
+      void this.duringRunResult.catch(() => {});
+    }
   }
   async commitOffsets(offsets: Array<{ topic: string; partition: number; offset: string }>) {
     if (this.commitError) throw this.commitError;
     this.commits.push(...offsets);
   }
-  async assignedPartitions() { return this.assignments; }
+  async assignedPartitions() {
+    if (this.assignmentError) throw this.assignmentError;
+    return this.assignments;
+  }
   seek(position: { topic: string; partition: number; offset: string }) {
     this.seeks.push(position);
   }
-  resume() {}
+  resume() { this.resumed = true; }
   stopError?: Error;
   disconnectError?: Error;
   async stop() { this.stopped = true; if (this.stopError) throw this.stopError; }
@@ -170,12 +185,19 @@ describe('DurableInboundConsumer', () => {
     [{ maxRetries: Number.POSITIVE_INFINITY }, 'maxRetries'],
     [{ maxRetries: -1 }, 'maxRetries'],
     [{ maxRetries: 1.5 }, 'maxRetries'],
+    [{ maxRetries: Number.MAX_VALUE }, 'maxRetries'],
     [{ baseBackoffMs: Number.NaN }, 'baseBackoffMs'],
     [{ baseBackoffMs: Number.POSITIVE_INFINITY }, 'baseBackoffMs'],
     [{ baseBackoffMs: 0 }, 'baseBackoffMs'],
     [{ baseBackoffMs: -1 }, 'baseBackoffMs'],
+    [{ baseBackoffMs: Number.MAX_VALUE }, 'baseBackoffMs'],
+    [{ maxRetries: 31, baseBackoffMs: 2 }, 'maximum retry delay'],
   ])('rejects invalid retry configuration %p', (options, field) => {
     expect(() => setup(options)).toThrow(field);
+  });
+
+  test('accepts the Node maximum timer delay', () => {
+    expect(() => setup({ maxRetries: 1, baseBackoffMs: 2_147_483_647 })).not.toThrow();
   });
 
   test('allows zero retries', async () => {
@@ -184,6 +206,27 @@ describe('DurableInboundConsumer', () => {
     await x.runtime.start();
     await x.consumer.emit(record('0'));
     expect(attempts).toBe(1);
+  });
+
+  test('rejects delivery until assignment initialization seeks and resumes', async () => {
+    const x = setup();
+    x.consumer.duringRun = record('99');
+    await x.runtime.start();
+    await expect(x.consumer.duringRunResult!).rejects.toThrow('not initialized');
+    expect(x.effects).toEqual([]);
+    expect(x.consumer.commits).toEqual([]);
+    expect(x.consumer.seeks[0]).toEqual({ topic: 'avs.events', partition: 0, offset: '0' });
+    expect(x.consumer.resumed).toBe(true);
+  });
+
+  test('cleans up failed startup and rejects later deliveries with original error', async () => {
+    const x = setup();
+    x.consumer.assignmentError = new Error('assignment failed');
+    await expect(x.runtime.start()).rejects.toThrow('assignment failed');
+    expect(x.consumer.stopped).toBe(true);
+    expect(x.consumer.disconnected).toBe(true);
+    await expect(x.consumer.emit(record('0'))).rejects.toThrow('not initialized');
+    expect(x.effects).toEqual([]);
   });
 
   test('signals startup catch-up at captured high-water marks', async () => {
