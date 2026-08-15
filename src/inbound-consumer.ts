@@ -220,10 +220,19 @@ export class DurableInboundConsumer<T = unknown> {
       this.accepting = false;
       this.rejectCatchUp(error);
       if (this.closed) throw error;
+      const cleanup = this.cleanup().then((cleanupErrors) => {
+        if (cleanupErrors.length > 0) throw this.withCleanup(cleanupErrors[0], cleanupErrors.slice(1), 'consumer startup cleanup failed');
+      });
+      this.shutdownPromise = cleanup;
       this.closed = true;
       this.tornDown = true;
-      const cleanupErrors = await this.cleanup();
-      throw this.withCleanup(error, cleanupErrors, 'consumer startup and cleanup failed');
+      try {
+        await cleanup;
+      } catch (cleanupError) {
+        const cleanupErrors = cleanupError instanceof AggregateError ? cleanupError.errors : [cleanupError];
+        throw this.withCleanup(error, cleanupErrors, 'consumer startup and cleanup failed');
+      }
+      throw error;
     }
   }
 
@@ -251,7 +260,8 @@ export class DurableInboundConsumer<T = unknown> {
     const errors: unknown[] = [];
     try { await this.consumer.stop(); } catch (error) { errors.push(error); }
     if (this.connected) await this.assignmentTail;
-    errors.push(...this.assignmentFailures, ...await this.cleanup(false));
+    const cleanupErrors = await this.cleanup(false);
+    errors.push(...this.assignmentFailures, ...cleanupErrors);
     if (errors.length > 0) throw this.withCleanup(errors[0], errors.slice(1), 'consumer shutdown failed');
   }
 
