@@ -38,10 +38,11 @@ class DurableInboundConsumer {
     bootHighWatermarks = new Map();
     caughtPartitions = new Set();
     accepting = false;
+    assignmentGeneration = 0;
+    catchUpSettled = false;
     caughtUpResolve;
-    caughtUpPromise = new Promise((resolve) => {
-        this.caughtUpResolve = resolve;
-    });
+    caughtUpReject;
+    caughtUpPromise;
     constructor(options) {
         this.consumer = options.consumer;
         this.topic = options.topic;
@@ -56,6 +57,7 @@ class DurableInboundConsumer {
             throw new RangeError('maximum retry delay exceeds the Node timer range');
         }
         this.sleep = options.sleep ?? promises_1.setTimeout;
+        this.resetCatchUp();
     }
     /** Connect, initialize paused assignments, seek durable starts, then resume intake. */
     async start() {
@@ -66,33 +68,30 @@ class DurableInboundConsumer {
                 autoCommit: false,
                 pauseOnAssignment: true,
                 eachMessage: (record) => this.enqueue(record),
+                eachAssignment: (assignments) => this.initializeAssignments(assignments),
             });
-            const assignments = await this.consumer.assignedPartitions(this.topic);
-            const checkpoints = new Map((await this.offsets.loadTopic(this.topic)).map(({ partition, offset }) => [partition, offset]));
-            for (const assignment of assignments) {
-                const start = checkpoints.get(assignment.partition) ?? assignment.low;
-                this.consumer.seek({ topic: this.topic, partition: assignment.partition, offset: start });
-                const key = `${this.topic}:${assignment.partition}`;
-                this.bootHighWatermarks.set(key, BigInt(assignment.high));
-                if (BigInt(start) >= BigInt(assignment.high))
-                    this.caughtPartitions.add(key);
-            }
-            if (this.bootHighWatermarks.size === this.caughtPartitions.size)
-                this.caughtUpResolve();
-            this.accepting = true;
-            this.consumer.resume(this.topic, assignments.map(({ partition }) => partition));
         }
         catch (error) {
             this.accepting = false;
+            this.rejectCatchUp(error);
+            const cleanupErrors = [];
             try {
                 await this.consumer.stop();
             }
-            catch { }
+            catch (cleanupError) {
+                cleanupErrors.push(cleanupError);
+            }
             await Promise.allSettled(this.partitions.values());
             try {
                 await this.consumer.disconnect();
             }
-            catch { }
+            catch (cleanupError) {
+                cleanupErrors.push(cleanupError);
+            }
+            if (cleanupErrors.length > 0) {
+                // oxlint-disable-next-line preserve-caught-error -- AggregateError carries primary in errors and cause.
+                throw new AggregateError([error, ...cleanupErrors], 'consumer startup and cleanup failed', { cause: error });
+            }
             throw error;
         }
     }
@@ -103,6 +102,7 @@ class DurableInboundConsumer {
     /** Stop intake, settle partition jobs, disconnect, then propagate the primary failure. */
     async shutdown() {
         this.accepting = false;
+        this.rejectCatchUp(new Error('consumer shut down before catch-up'));
         let primary;
         try {
             try {
@@ -124,6 +124,64 @@ class DurableInboundConsumer {
         }
         if (primary !== undefined)
             throw primary;
+    }
+    resetCatchUp() {
+        this.catchUpSettled = false;
+        this.caughtUpPromise = new Promise((resolve, reject) => {
+            this.caughtUpResolve = () => { this.catchUpSettled = true; resolve(); };
+            this.caughtUpReject = (error) => { this.catchUpSettled = true; reject(error); };
+        });
+        void this.caughtUpPromise.catch(() => { });
+    }
+    rejectCatchUp(error) {
+        if (!this.catchUpSettled)
+            this.caughtUpReject(error);
+    }
+    async initializeAssignments(assignments) {
+        this.accepting = false;
+        if (this.assignmentGeneration > 0) {
+            this.rejectCatchUp(new Error('assignment replaced before catch-up'));
+            this.resetCatchUp();
+        }
+        this.assignmentGeneration += 1;
+        this.bootHighWatermarks.clear();
+        this.caughtPartitions.clear();
+        try {
+            const checkpoints = new Map((await this.offsets.loadTopic(this.topic)).map(({ partition, offset }) => [partition, offset]));
+            for (const assignment of assignments) {
+                let low;
+                let high;
+                let position;
+                let start;
+                const checkpoint = checkpoints.get(assignment.partition);
+                try {
+                    low = BigInt(assignment.low);
+                    high = BigInt(assignment.high);
+                    position = BigInt(assignment.position);
+                    start = BigInt(checkpoint ?? assignment.low);
+                }
+                catch (error) {
+                    throw new RangeError(`checkpoint or broker bounds are invalid for partition ${assignment.partition}`, { cause: error });
+                }
+                if (low > high || position < low || position > high || start < low || start > high) {
+                    throw new RangeError(`checkpoint is outside broker bounds for partition ${assignment.partition}`);
+                }
+                const offset = start.toString();
+                this.consumer.seek({ topic: this.topic, partition: assignment.partition, offset });
+                const key = `${this.topic}:${assignment.partition}`;
+                this.bootHighWatermarks.set(key, high);
+                if (start === high)
+                    this.caughtPartitions.add(key);
+            }
+            if (this.bootHighWatermarks.size === this.caughtPartitions.size)
+                this.caughtUpResolve();
+            this.accepting = true;
+            this.consumer.resume(this.topic, assignments.map(({ partition }) => partition));
+        }
+        catch (error) {
+            this.rejectCatchUp(error);
+            throw error;
+        }
     }
     enqueue(record) {
         if (!this.accepting)

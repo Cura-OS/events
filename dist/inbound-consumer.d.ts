@@ -15,6 +15,13 @@ export interface TopicPartitionOffset {
     /** Next offset to consume. */
     readonly offset: string;
 }
+/** Paused broker assignment with retained offset bounds. */
+export interface ConsumerAssignment {
+    readonly partition: number;
+    readonly low: string;
+    readonly high: string;
+    readonly position: string;
+}
 /** Structural broker port. A KafkaJS adapter can satisfy this without becoming a dependency. */
 export interface Consumer {
     connect(): Promise<void>;
@@ -27,15 +34,10 @@ export interface Consumer {
         /** Keep newly assigned partitions paused until explicit resume. */
         readonly pauseOnAssignment: true;
         readonly eachMessage: (record: ConsumerRecord) => Promise<void>;
+        /** Initialize every paused assignment generation before broker delivery resumes. */
+        readonly eachAssignment: (assignments: readonly ConsumerAssignment[]) => Promise<void>;
     }): Promise<void>;
     commitOffsets(offsets: readonly TopicPartitionOffset[]): Promise<void>;
-    /** Wait for paused assignment, then return broker bounds and current positions. */
-    assignedPartitions(topic: string): Promise<readonly {
-        partition: number;
-        low: string;
-        high: string;
-        position: string;
-    }[]>;
     seek(position: TopicPartitionOffset): void;
     resume(topic: string, partitions: readonly number[]): void;
     stop(): Promise<void>;
@@ -99,8 +101,11 @@ export declare class DurableInboundConsumer<T = unknown> {
     private readonly bootHighWatermarks;
     private readonly caughtPartitions;
     private accepting;
+    private assignmentGeneration;
+    private catchUpSettled;
     private caughtUpResolve;
-    private readonly caughtUpPromise;
+    private caughtUpReject;
+    private caughtUpPromise;
     constructor(options: DurableInboundConsumerOptions<T>);
     /** Connect, initialize paused assignments, seek durable starts, then resume intake. */
     start(): Promise<void>;
@@ -108,6 +113,9 @@ export declare class DurableInboundConsumer<T = unknown> {
     caughtUp(): Promise<void>;
     /** Stop intake, settle partition jobs, disconnect, then propagate the primary failure. */
     shutdown(): Promise<void>;
+    private resetCatchUp;
+    private rejectCatchUp;
+    private initializeAssignments;
     private enqueue;
     private process;
     private advance;

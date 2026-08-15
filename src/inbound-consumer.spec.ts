@@ -23,6 +23,7 @@ const record = (
 
 class FakeConsumer implements Consumer {
   each?: (record: ConsumerRecord) => Promise<void>;
+  eachAssignment?: (assignments: typeof this.assignments) => Promise<void>;
   commits: Array<{ topic: string; partition: number; offset: string }> = [];
   seeks: Array<{ topic: string; partition: number; offset: string }> = [];
   stopped = false;
@@ -39,26 +40,33 @@ class FakeConsumer implements Consumer {
     autoCommit: false;
     pauseOnAssignment: true;
     eachMessage(record: ConsumerRecord): Promise<void>;
+    eachAssignment(assignments: typeof this.assignments): Promise<void>;
   }) {
     expect(config).toMatchObject({ autoCommit: false, pauseOnAssignment: true });
     this.each = config.eachMessage;
+    this.eachAssignment = config.eachAssignment;
     if (this.duringRun) {
       this.duringRunResult = config.eachMessage(this.duringRun);
       void this.duringRunResult.catch(() => {});
     }
+    await this.assignmentFailure();
+    await config.eachAssignment(this.assignments);
   }
   async commitOffsets(offsets: Array<{ topic: string; partition: number; offset: string }>) {
     if (this.commitError) throw this.commitError;
     this.commits.push(...offsets);
   }
-  async assignedPartitions() {
-    if (this.assignmentError) throw this.assignmentError;
-    return this.assignments;
+  async rebalance(assignments: typeof this.assignments) {
+    this.assignments = assignments;
+    await this.eachAssignment!(assignments);
   }
   seek(position: { topic: string; partition: number; offset: string }) {
     this.seeks.push(position);
   }
   resume() { this.resumed = true; }
+  async assignmentFailure() {
+    if (this.assignmentError) throw this.assignmentError;
+  }
   stopError?: Error;
   disconnectError?: Error;
   async stop() { this.stopped = true; if (this.stopError) throw this.stopError; }
@@ -131,6 +139,40 @@ describe('DurableInboundConsumer', () => {
     x.consumer.assignments = [{ partition: 3, low: '0', high: '10', position: '10' }];
     await x.runtime.start();
     expect(x.consumer.seeks).toEqual([{ topic: 'avs.events', partition: 3, offset: '9' }]);
+  });
+
+  test('initializes and resumes every rebalance assignment generation', async () => {
+    const x = setup();
+    await x.runtime.start();
+    x.offsets.values.set('avs.events:2', '7');
+    x.consumer.resumed = false;
+    await x.consumer.rebalance([{ partition: 2, low: '5', high: '9', position: '9' }]);
+    expect(x.consumer.seeks.at(-1)).toEqual({ topic: 'avs.events', partition: 2, offset: '7' });
+    expect(x.consumer.resumed).toBe(true);
+  });
+
+  test.each([
+    ['0', false],
+    ['10', false],
+    ['-1', true],
+    ['11', true],
+    ['bad', true],
+  ])('validates checkpoint %s against broker bounds', async (checkpoint, invalid) => {
+    const x = setup();
+    x.offsets.values.set('avs.events:0', checkpoint);
+    x.consumer.assignments = [{ partition: 0, low: '0', high: '10', position: '10' }];
+    const start = x.runtime.start();
+    if (invalid) await expect(start).rejects.toThrow('checkpoint');
+    else await expect(start).resolves.toBeUndefined();
+  });
+
+  test.each([
+    [{ partition: 0, low: '5', high: '4', position: '5' }],
+    [{ partition: 0, low: '0', high: '4', position: '5' }],
+  ])('rejects invalid broker bounds %p', async (assignment) => {
+    const x = setup();
+    x.consumer.assignments = [assignment];
+    await expect(x.runtime.start()).rejects.toThrow('broker bounds');
   });
 
   test('isolates partition ordering', async () => {
@@ -222,11 +264,45 @@ describe('DurableInboundConsumer', () => {
   test('cleans up failed startup and rejects later deliveries with original error', async () => {
     const x = setup();
     x.consumer.assignmentError = new Error('assignment failed');
+    x.consumer.assignments = [];
     await expect(x.runtime.start()).rejects.toThrow('assignment failed');
     expect(x.consumer.stopped).toBe(true);
     expect(x.consumer.disconnected).toBe(true);
     await expect(x.consumer.emit(record('0'))).rejects.toThrow('not initialized');
     expect(x.effects).toEqual([]);
+  });
+
+  test('aggregates startup cleanup failures behind the primary error', async () => {
+    const x = setup();
+    x.consumer.assignmentError = new Error('assignment failed');
+    x.consumer.assignments = [];
+    x.consumer.stopError = new Error('stop failed');
+    x.consumer.disconnectError = new Error('disconnect failed');
+    try {
+      await x.runtime.start();
+      throw new Error('expected startup failure');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).cause).toBe(x.consumer.assignmentError);
+      expect((error as AggregateError).errors.map((item) => (item as Error).message)).toEqual([
+        'assignment failed', 'stop failed', 'disconnect failed',
+      ]);
+    }
+  });
+
+  test('rejects catch-up on startup failure and shutdown before catch-up', async () => {
+    const failed = setup();
+    failed.consumer.assignmentError = new Error('assignment failed');
+    failed.consumer.assignments = [];
+    const startupCatchUp = failed.runtime.caughtUp();
+    await expect(failed.runtime.start()).rejects.toThrow('assignment failed');
+    await expect(startupCatchUp).rejects.toThrow('assignment failed');
+
+    const stopped = setup();
+    await stopped.runtime.start();
+    const shutdownCatchUp = stopped.runtime.caughtUp();
+    await stopped.runtime.shutdown();
+    await expect(shutdownCatchUp).rejects.toThrow('shut down before catch-up');
   });
 
   test('signals startup catch-up at captured high-water marks', async () => {
