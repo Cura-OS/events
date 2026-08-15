@@ -178,14 +178,20 @@ export class DurableInboundConsumer<T = unknown> {
   /** Stop intake, settle partition jobs, disconnect, then propagate the primary failure. */
   async shutdown(): Promise<void> {
     this.accepting = false;
+    this.assignmentEpoch += 1;
     this.rejectCatchUp(new Error('consumer shut down before catch-up'));
-    const cleanupErrors = await this.cleanup();
-    if (cleanupErrors.length > 0) throw this.withCleanup(cleanupErrors[0], cleanupErrors.slice(1), 'consumer shutdown failed');
-  }
-
-  private async cleanup(): Promise<unknown[]> {
     const errors: unknown[] = [];
     try { await this.consumer.stop(); } catch (error) { errors.push(error); }
+    await this.assignmentTail;
+    errors.push(...await this.cleanup(false));
+    if (errors.length > 0) throw this.withCleanup(errors[0], errors.slice(1), 'consumer shutdown failed');
+  }
+
+  private async cleanup(stop = true): Promise<unknown[]> {
+    const errors: unknown[] = [];
+    if (stop) {
+      try { await this.consumer.stop(); } catch (error) { errors.push(error); }
+    }
     const jobs = await Promise.allSettled(this.partitions.values());
     for (const job of jobs) if (job.status === 'rejected') errors.push(job.reason);
     try { await this.consumer.disconnect(); } catch (error) { errors.push(error); }
@@ -213,6 +219,10 @@ export class DurableInboundConsumer<T = unknown> {
 
   private enqueueAssignments(assignments: readonly ConsumerAssignment[]): Promise<void> {
     const epoch = ++this.assignmentEpoch;
+    if (epoch > 1) {
+      this.rejectCatchUp(new Error('assignment replaced before catch-up'));
+      this.resetCatchUp();
+    }
     const pending = this.assignmentTail.then(() => this.initializeAssignments(assignments, epoch));
     this.assignmentTail = pending.catch(() => {});
     return pending;
@@ -225,12 +235,10 @@ export class DurableInboundConsumer<T = unknown> {
     this.accepting = false;
     try {
       if (epoch > 1) {
-        this.rejectCatchUp(new Error('assignment replaced before catch-up'));
         const jobs = await Promise.allSettled(this.partitions.values());
         const rejected = jobs.find((job) => job.status === 'rejected');
         if (rejected?.status === 'rejected') throw rejected.reason;
         if (epoch !== this.assignmentEpoch) return;
-        this.resetCatchUp();
       }
       const checkpoints = new Map(
         (await this.offsets.loadTopic(this.topic)).map(({ partition, offset }) => [partition, offset]),
@@ -255,7 +263,10 @@ export class DurableInboundConsumer<T = unknown> {
             { cause: error },
           );
         }
-        if (low > high || position < low || position > high || start < low || start > high) {
+        if (
+          low < 0n || high < 0n || position < 0n ||
+          low > high || position < low || position > high || start < low || start > high
+        ) {
           throw new RangeError(`checkpoint is outside broker bounds for partition ${assignment.partition}`);
         }
         const offset = start.toString();
@@ -268,8 +279,10 @@ export class DurableInboundConsumer<T = unknown> {
       this.accepting = true;
       this.consumer.resume(this.topic, assignments.map(({ partition }) => partition));
     } catch (error) {
-      this.rejectCatchUp(error);
-      throw error;
+      if (epoch === this.assignmentEpoch) {
+        this.rejectCatchUp(error);
+        throw error;
+      }
     }
   }
 

@@ -38,12 +38,17 @@
   },
   "scripts": {
     "build": "tsc",
-    "check:dist": "bun run build && test -z \"$(git status --porcelain -- dist)\"",
+    "check:dist": "./scripts/check-dist.sh",
     "lint": "oxlint .",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
     "typecheck": "tsc --noEmit"
   },
   "type": "commonjs",
-  "types": "./dist/index.d.ts"
+  "types": "./dist/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "node": ["dist/node.d.ts"]
+    }
+  }
 }

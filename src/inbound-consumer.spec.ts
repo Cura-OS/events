@@ -86,7 +86,9 @@ class MemoryOffsets implements OffsetStore {
     if (this.failSave) throw new Error('checkpoint unavailable');
     this.values.set(`${topic}:${partition}`, nextOffset);
   }
+  loadTopicGate?: Promise<void>;
   async loadTopic(topic: string) {
+    await this.loadTopicGate;
     return [...this.values].flatMap(([key, offset]) => {
       const [storedTopic, partition] = key.split(':');
       return storedTopic === topic ? [{ partition: Number(partition), offset }] : [];
@@ -180,6 +182,9 @@ describe('DurableInboundConsumer', () => {
   test.each([
     [{ partition: 0, low: '5', high: '4', position: '5' }],
     [{ partition: 0, low: '0', high: '4', position: '5' }],
+    [{ partition: 0, low: '-1', high: '4', position: '0' }],
+    [{ partition: 0, low: '0', high: '-1', position: '0' }],
+    [{ partition: 0, low: '0', high: '4', position: '-1' }],
   ])('rejects invalid broker bounds %p', async (assignment) => {
     const x = setup();
     x.consumer.assignments = [assignment];
@@ -369,6 +374,47 @@ describe('DurableInboundConsumer', () => {
     current.offsets.values.set('avs.events:0', '2');
     await current.runtime.start();
     await current.runtime.caughtUp();
+  });
+
+  test('shutdown fences a blocked rebalance before disconnecting', async () => {
+    let release!: () => void;
+    const x = setup();
+    await x.runtime.start();
+    x.consumer.resumes = [];
+    x.offsets.loadTopicGate = new Promise<void>((resolve) => { release = resolve; });
+    const rebalance = x.consumer.rebalance([{ partition: 2, low: '0', high: '0', position: '0' }]);
+    await Promise.resolve();
+    const shutdown = x.runtime.shutdown();
+    expect(x.consumer.disconnected).toBe(false);
+    release();
+    await Promise.all([rebalance, shutdown]);
+    expect(x.consumer.resumes).toEqual([]);
+    expect(x.consumer.disconnected).toBe(true);
+  });
+
+  test('stale assignment failure cannot reject the newer catch-up promise', async () => {
+    let rejectFirst!: (error: Error) => void;
+    let enteredFirst!: () => void;
+    const firstEntered = new Promise<void>((resolve) => { enteredFirst = resolve; });
+    const x = setup();
+    await x.runtime.start();
+    const loadTopic = x.offsets.loadTopic.bind(x.offsets);
+    let calls = 0;
+    x.offsets.loadTopic = async (topic) => {
+      calls += 1;
+      if (calls === 1) {
+        enteredFirst();
+        await new Promise<void>((_, reject) => { rejectFirst = reject; });
+      }
+      return loadTopic(topic);
+    };
+    const first = x.consumer.rebalance([{ partition: 2, low: '0', high: '0', position: '0' }]);
+    await firstEntered;
+    const second = x.consumer.rebalance([{ partition: 3, low: '0', high: '0', position: '0' }]);
+    const currentCatchUp = x.runtime.caughtUp();
+    rejectFirst(new Error('stale assignment failed'));
+    await Promise.all([first, second]);
+    await expect(currentCatchUp).resolves.toBeUndefined();
   });
 
   test('aggregates shutdown stop, drain, and disconnect failures', async () => {
