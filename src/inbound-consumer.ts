@@ -155,6 +155,7 @@ export class DurableInboundConsumer<T = unknown> {
 
   /** Connect, initialize paused assignments, seek durable starts, then resume intake. */
   async start(): Promise<void> {
+    if (this.closed) throw new Error('consumer has shut down');
     try {
       await this.consumer.connect();
       await this.consumer.subscribe({ topics: [this.topic], fromBeginning: false });
@@ -296,10 +297,8 @@ export class DurableInboundConsumer<T = unknown> {
       this.accepting = true;
       this.consumer.resume(this.topic, initialized.map(({ partition }) => partition));
     } catch (error) {
-      if (epoch === this.assignmentEpoch) {
-        this.rejectCatchUp(error);
-        throw error;
-      }
+      if (epoch === this.assignmentEpoch) this.rejectCatchUp(error);
+      throw error;
     }
   }
 

@@ -68,6 +68,8 @@ class DurableInboundConsumer {
     }
     /** Connect, initialize paused assignments, seek durable starts, then resume intake. */
     async start() {
+        if (this.closed)
+            throw new Error('consumer has shut down');
         try {
             await this.consumer.connect();
             await this.consumer.subscribe({ topics: [this.topic], fromBeginning: false });
@@ -222,10 +224,9 @@ class DurableInboundConsumer {
             this.consumer.resume(this.topic, initialized.map(({ partition }) => partition));
         }
         catch (error) {
-            if (epoch === this.assignmentEpoch) {
+            if (epoch === this.assignmentEpoch)
                 this.rejectCatchUp(error);
-                throw error;
-            }
+            throw error;
         }
     }
     enqueue(record) {

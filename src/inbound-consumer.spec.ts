@@ -33,7 +33,8 @@ class FakeConsumer implements Consumer {
   commitError?: Error;
   resumed = false;
   resumes: Array<{ topic: string; partitions: number[] }> = [];
-  async connect() {}
+  connects = 0;
+  async connect() { this.connects += 1; }
   async subscribe() {}
   duringRun?: ConsumerRecord;
   duringRunResult?: Promise<void>;
@@ -416,18 +417,20 @@ describe('DurableInboundConsumer', () => {
     expect(x.consumer.disconnected).toBe(true);
   });
 
-  test('post-shutdown assignment callbacks are no-ops after disconnect', async () => {
+  test('shutdown prevents reconnecting and post-disconnect assignment callbacks', async () => {
     const x = setup();
     await x.runtime.start();
     x.consumer.seeks = [];
     x.consumer.resumes = [];
     await x.runtime.shutdown();
+    await expect(x.runtime.start()).rejects.toThrow('shut down');
     await x.consumer.rebalance([{ partition: 2, low: '0', high: '0', position: '0' }]);
+    expect(x.consumer.connects).toBe(1);
     expect(x.consumer.seeks).toEqual([]);
     expect(x.consumer.resumes).toEqual([]);
   });
 
-  test('stale assignment failure cannot reject the newer catch-up promise', async () => {
+  test('stale rebalance failure remains observable without rejecting newer catch-up', async () => {
     let rejectFirst!: (error: Error) => void;
     let enteredFirst!: () => void;
     const firstEntered = new Promise<void>((resolve) => { enteredFirst = resolve; });
@@ -448,8 +451,10 @@ describe('DurableInboundConsumer', () => {
     const second = x.consumer.rebalance([{ partition: 3, low: '0', high: '0', position: '0' }]);
     const currentCatchUp = x.runtime.caughtUp();
     rejectFirst(new Error('stale assignment failed'));
-    await Promise.all([first, second]);
+    await expect(first).rejects.toThrow('stale assignment failed');
+    await second;
     await expect(currentCatchUp).resolves.toBeUndefined();
+    await expect(x.runtime.shutdown()).rejects.toThrow('stale assignment failed');
   });
 
   test('aggregates shutdown stop, drain, and disconnect failures', async () => {
