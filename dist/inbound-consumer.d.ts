@@ -101,7 +101,8 @@ export declare class DurableInboundConsumer<T = unknown> {
     private readonly bootHighWatermarks;
     private readonly caughtPartitions;
     private accepting;
-    private assignmentGeneration;
+    private assignmentEpoch;
+    private assignmentTail;
     private catchUpSettled;
     private caughtUpResolve;
     private caughtUpReject;
@@ -117,6 +118,7 @@ export declare class DurableInboundConsumer<T = unknown> {
     private withCleanup;
     private resetCatchUp;
     private rejectCatchUp;
+    private enqueueAssignments;
     private initializeAssignments;
     private enqueue;
     private process;

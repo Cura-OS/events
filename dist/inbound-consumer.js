@@ -3,7 +3,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.DurableInboundConsumer = void 0;
 const promises_1 = require("node:timers/promises");
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
-const nextOffset = (offset) => (BigInt(offset) + 1n).toString();
+const nextOffset = (offset) => {
+    if (!/^\d+$/.test(offset))
+        throw new RangeError('record offset must be a nonnegative integer');
+    return (BigInt(offset) + 1n).toString();
+};
 const decode = new TextDecoder('utf-8', { fatal: true });
 const nonnegativeInteger = (name, value) => {
     if (!Number.isSafeInteger(value) || value < 0) {
@@ -38,7 +42,8 @@ class DurableInboundConsumer {
     bootHighWatermarks = new Map();
     caughtPartitions = new Set();
     accepting = false;
-    assignmentGeneration = 0;
+    assignmentEpoch = 0;
+    assignmentTail = Promise.resolve();
     catchUpSettled = false;
     caughtUpResolve;
     caughtUpReject;
@@ -68,7 +73,7 @@ class DurableInboundConsumer {
                 autoCommit: false,
                 pauseOnAssignment: true,
                 eachMessage: (record) => this.enqueue(record),
-                eachAssignment: (assignments) => this.initializeAssignments(assignments),
+                eachAssignment: (assignments) => this.enqueueAssignments(assignments),
             });
         }
         catch (error) {
@@ -128,21 +133,30 @@ class DurableInboundConsumer {
         if (!this.catchUpSettled)
             this.caughtUpReject(error);
     }
-    async initializeAssignments(assignments) {
+    enqueueAssignments(assignments) {
+        const epoch = ++this.assignmentEpoch;
+        const pending = this.assignmentTail.then(() => this.initializeAssignments(assignments, epoch));
+        this.assignmentTail = pending.catch(() => { });
+        return pending;
+    }
+    async initializeAssignments(assignments, epoch) {
         this.accepting = false;
         try {
-            if (this.assignmentGeneration > 0) {
+            if (epoch > 1) {
                 this.rejectCatchUp(new Error('assignment replaced before catch-up'));
                 const jobs = await Promise.allSettled(this.partitions.values());
                 const rejected = jobs.find((job) => job.status === 'rejected');
                 if (rejected?.status === 'rejected')
                     throw rejected.reason;
+                if (epoch !== this.assignmentEpoch)
+                    return;
                 this.resetCatchUp();
             }
-            this.assignmentGeneration += 1;
+            const checkpoints = new Map((await this.offsets.loadTopic(this.topic)).map(({ partition, offset }) => [partition, offset]));
+            if (epoch !== this.assignmentEpoch)
+                return;
             this.bootHighWatermarks.clear();
             this.caughtPartitions.clear();
-            const checkpoints = new Map((await this.offsets.loadTopic(this.topic)).map(({ partition, offset }) => [partition, offset]));
             for (const assignment of assignments) {
                 let low;
                 let high;
@@ -193,6 +207,7 @@ class DurableInboundConsumer {
         return pending;
     }
     async process(record) {
+        const offset = nextOffset(record.offset);
         let parsed;
         try {
             if (record.value === null)
@@ -201,7 +216,7 @@ class DurableInboundConsumer {
         }
         catch (error) {
             await this.deadLetters.write({ record, reason: 'malformed', error });
-            await this.advance(record);
+            await this.advance(record, offset);
             return;
         }
         let lastError;
@@ -216,12 +231,12 @@ class DurableInboundConsumer {
                 lastError = error;
             }
             if (disposition === 'ack') {
-                await this.advance(record);
+                await this.advance(record, offset);
                 return;
             }
             if (disposition === 'dead-letter') {
                 await this.deadLetters.write({ record, reason: 'handler-rejected' });
-                await this.advance(record);
+                await this.advance(record, offset);
                 return;
             }
             if (attempt < this.maxRetries) {
@@ -230,10 +245,9 @@ class DurableInboundConsumer {
         }
         /* oxlint-enable no-await-in-loop */
         await this.deadLetters.write({ record, reason: 'retries-exhausted', error: lastError });
-        await this.advance(record);
+        await this.advance(record, offset);
     }
-    async advance(record) {
-        const offset = nextOffset(record.offset);
+    async advance(record, offset) {
         await this.offsets.save(record.topic, record.partition, offset);
         await this.consumer.commitOffsets([{ topic: record.topic, partition: record.partition, offset }]);
         const key = partitionKey(record);

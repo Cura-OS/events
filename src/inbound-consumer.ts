@@ -87,7 +87,10 @@ export interface DurableInboundConsumerOptions<T> {
 }
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
-const nextOffset = (offset: string): string => (BigInt(offset) + 1n).toString();
+const nextOffset = (offset: string): string => {
+  if (!/^\d+$/.test(offset)) throw new RangeError('record offset must be a nonnegative integer');
+  return (BigInt(offset) + 1n).toString();
+};
 const decode = new TextDecoder('utf-8', { fatal: true });
 const nonnegativeInteger = (name: string, value: number): number => {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -124,7 +127,8 @@ export class DurableInboundConsumer<T = unknown> {
   private readonly bootHighWatermarks = new Map<string, bigint>();
   private readonly caughtPartitions = new Set<string>();
   private accepting = false;
-  private assignmentGeneration = 0;
+  private assignmentEpoch = 0;
+  private assignmentTail: Promise<void> = Promise.resolve();
   private catchUpSettled = false;
   private caughtUpResolve!: () => void;
   private caughtUpReject!: (error: unknown) => void;
@@ -156,7 +160,7 @@ export class DurableInboundConsumer<T = unknown> {
         autoCommit: false,
         pauseOnAssignment: true,
         eachMessage: (record) => this.enqueue(record),
-        eachAssignment: (assignments) => this.initializeAssignments(assignments),
+        eachAssignment: (assignments) => this.enqueueAssignments(assignments),
       });
     } catch (error) {
       this.accepting = false;
@@ -207,22 +211,33 @@ export class DurableInboundConsumer<T = unknown> {
     if (!this.catchUpSettled) this.caughtUpReject(error);
   }
 
-  private async initializeAssignments(assignments: readonly ConsumerAssignment[]): Promise<void> {
+  private enqueueAssignments(assignments: readonly ConsumerAssignment[]): Promise<void> {
+    const epoch = ++this.assignmentEpoch;
+    const pending = this.assignmentTail.then(() => this.initializeAssignments(assignments, epoch));
+    this.assignmentTail = pending.catch(() => {});
+    return pending;
+  }
+
+  private async initializeAssignments(
+    assignments: readonly ConsumerAssignment[],
+    epoch: number,
+  ): Promise<void> {
     this.accepting = false;
     try {
-      if (this.assignmentGeneration > 0) {
+      if (epoch > 1) {
         this.rejectCatchUp(new Error('assignment replaced before catch-up'));
         const jobs = await Promise.allSettled(this.partitions.values());
         const rejected = jobs.find((job) => job.status === 'rejected');
         if (rejected?.status === 'rejected') throw rejected.reason;
+        if (epoch !== this.assignmentEpoch) return;
         this.resetCatchUp();
       }
-      this.assignmentGeneration += 1;
-      this.bootHighWatermarks.clear();
-      this.caughtPartitions.clear();
       const checkpoints = new Map(
         (await this.offsets.loadTopic(this.topic)).map(({ partition, offset }) => [partition, offset]),
       );
+      if (epoch !== this.assignmentEpoch) return;
+      this.bootHighWatermarks.clear();
+      this.caughtPartitions.clear();
       for (const assignment of assignments) {
         let low: bigint;
         let high: bigint;
@@ -274,13 +289,14 @@ export class DurableInboundConsumer<T = unknown> {
   }
 
   private async process(record: ConsumerRecord): Promise<void> {
+    const offset = nextOffset(record.offset);
     let parsed: T;
     try {
       if (record.value === null) throw new Error('record value is null');
       parsed = this.schema.parse(JSON.parse(decode.decode(record.value)));
     } catch (error) {
       await this.deadLetters.write({ record, reason: 'malformed', error });
-      await this.advance(record);
+      await this.advance(record, offset);
       return;
     }
 
@@ -295,12 +311,12 @@ export class DurableInboundConsumer<T = unknown> {
         lastError = error;
       }
       if (disposition === 'ack') {
-        await this.advance(record);
+        await this.advance(record, offset);
         return;
       }
       if (disposition === 'dead-letter') {
         await this.deadLetters.write({ record, reason: 'handler-rejected' });
-        await this.advance(record);
+        await this.advance(record, offset);
         return;
       }
       if (attempt < this.maxRetries) {
@@ -309,11 +325,10 @@ export class DurableInboundConsumer<T = unknown> {
     }
     /* oxlint-enable no-await-in-loop */
     await this.deadLetters.write({ record, reason: 'retries-exhausted', error: lastError });
-    await this.advance(record);
+    await this.advance(record, offset);
   }
 
-  private async advance(record: ConsumerRecord): Promise<void> {
-    const offset = nextOffset(record.offset);
+  private async advance(record: ConsumerRecord, offset: string): Promise<void> {
     await this.offsets.save(record.topic, record.partition, offset);
     await this.consumer.commitOffsets([{ topic: record.topic, partition: record.partition, offset }]);
     const key = partitionKey(record);

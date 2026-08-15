@@ -20,9 +20,11 @@ test('published root exports schemas and Node runtime only from its subpath', as
   expect(build.success).toBe(true);
   expect(await build.outputs[0]!.text()).not.toContain('node:timers/promises');
 
-  await expect(Bun.build({
+  const rejectedNodeRuntime = await Bun.build({
     entrypoints: ['virtual:browser-entry'],
     target: 'browser',
+    throw: false,
+    logLevel: 'silent',
     plugins: [{
       name: 'browser-entry',
       setup(builder) {
@@ -35,5 +37,6 @@ test('published root exports schemas and Node runtime only from its subpath', as
         }));
       },
     }],
-  })).rejects.toThrow('Bundle failed');
+  });
+  expect(rejectedNodeRuntime.success).toBe(false);
 });

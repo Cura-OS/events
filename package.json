@@ -38,7 +38,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "check:dist": "bun run build && git diff --exit-code -- dist",
+    "check:dist": "bun run build && test -z \"$(git status --porcelain -- dist)\"",
     "lint": "oxlint .",
     "test": "bun test",
     "test:coverage": "bun test --coverage",

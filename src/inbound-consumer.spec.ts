@@ -32,6 +32,7 @@ class FakeConsumer implements Consumer {
   assignmentError?: Error;
   commitError?: Error;
   resumed = false;
+  resumes: Array<{ topic: string; partitions: number[] }> = [];
   async connect() {}
   async subscribe() {}
   duringRun?: ConsumerRecord;
@@ -63,7 +64,10 @@ class FakeConsumer implements Consumer {
   seek(position: { topic: string; partition: number; offset: string }) {
     this.seeks.push(position);
   }
-  resume() { this.resumed = true; }
+  resume(topic: string, partitions: readonly number[]) {
+    this.resumed = true;
+    this.resumes.push({ topic, partitions: [...partitions] });
+  }
   async assignmentFailure() {
     if (this.assignmentError) throw this.assignmentError;
   }
@@ -141,22 +145,21 @@ describe('DurableInboundConsumer', () => {
     expect(x.consumer.seeks).toEqual([{ topic: 'avs.events', partition: 3, offset: '9' }]);
   });
 
-  test('drains prior work before rebalance seeks and resumes', async () => {
+  test('only the latest overlapping rebalance seeks and resumes', async () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => { release = resolve; });
     const x = setup({ handler: { async handle() { await pending; return 'ack'; } } });
     await x.runtime.start();
     const delivery = x.consumer.emit(record('0'));
-    x.offsets.values.set('avs.events:2', '7');
-    x.consumer.resumed = false;
-    const rebalance = x.consumer.rebalance([{ partition: 2, low: '5', high: '9', position: '9' }]);
+    x.consumer.resumes = [];
+    const first = x.consumer.rebalance([{ partition: 2, low: '5', high: '9', position: '9' }]);
+    const second = x.consumer.rebalance([{ partition: 3, low: '6', high: '10', position: '10' }]);
     await Promise.resolve();
-    expect(x.consumer.resumed).toBe(false);
-    expect(x.consumer.seeks.at(-1)).toEqual({ topic: 'avs.events', partition: 0, offset: '0' });
+    expect(x.consumer.resumes).toEqual([]);
     release();
-    await Promise.all([delivery, rebalance]);
-    expect(x.consumer.seeks.at(-1)).toEqual({ topic: 'avs.events', partition: 2, offset: '7' });
-    expect(x.consumer.resumed).toBe(true);
+    await Promise.all([delivery, first, second]);
+    expect(x.consumer.seeks).not.toContainEqual({ topic: 'avs.events', partition: 2, offset: '5' });
+    expect(x.consumer.resumes).toEqual([{ topic: 'avs.events', partitions: [3] }]);
   });
 
   test.each([
@@ -200,6 +203,15 @@ describe('DurableInboundConsumer', () => {
     release();
     await Promise.all([firstBlocked, secondBlocked]);
     expect(seen).toEqual(['0:a', '1:b', '0:c']);
+  });
+
+  test.each(['-1', 'not-an-offset'])('rejects invalid offset %s before parsing or effects', async (offset) => {
+    const x = setup();
+    await x.runtime.start();
+    await expect(x.consumer.emit(record(offset, 0, 'not-json'))).rejects.toThrow('offset');
+    expect(x.dead).toEqual([]);
+    expect(x.effects).toEqual([]);
+    expect(x.consumer.commits).toEqual([]);
   });
 
   test('dead-letters poison before advancing', async () => {
