@@ -1,7 +1,7 @@
 {
   "name": "@curaos/events",
   "description": "CuraOS typed event schema contracts for event-led architecture.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "devDependencies": {
     "oxlint": "1.68.0",
     "@curaos/tsconfig": "workspace:*",
@@ -16,6 +16,10 @@
       "import": "./dist/index.js",
       "require": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "node": "./dist/node.js"
     }
   },
   "files": [
@@ -34,11 +38,17 @@
   },
   "scripts": {
     "build": "tsc",
+    "check:dist": "./scripts/check-dist.sh",
     "lint": "oxlint .",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
     "typecheck": "tsc --noEmit"
   },
   "type": "commonjs",
-  "types": "./dist/index.d.ts"
+  "types": "./dist/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "node": ["dist/node.d.ts"]
+    }
+  }
 }
