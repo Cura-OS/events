@@ -80,8 +80,10 @@ class DurableInboundConsumer {
     async startInternal() {
         try {
             await this.consumer.connect();
-            if (this.closed)
+            if (this.closed) {
+                await this.consumer.disconnect();
                 throw new Error('consumer has shut down');
+            }
             await this.consumer.subscribe({ topics: [this.topic], fromBeginning: false });
             if (this.closed)
                 throw new Error('consumer has shut down');
@@ -95,7 +97,7 @@ class DurableInboundConsumer {
             void initialAssignment.catch(() => { });
             let latestInitialEpoch = 0;
             try {
-                await this.consumer.run({
+                const run = this.consumer.run({
                     autoCommit: false,
                     pauseOnAssignment: true,
                     eachMessage: (record) => this.enqueue(record),
@@ -109,6 +111,8 @@ class DurableInboundConsumer {
                         return pending;
                     },
                 });
+                void run.catch(() => { });
+                await Promise.race([run, initialAssignment]);
                 await initialAssignment;
                 if (this.closed)
                     throw new Error('consumer has shut down');
