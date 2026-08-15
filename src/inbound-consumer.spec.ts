@@ -141,12 +141,20 @@ describe('DurableInboundConsumer', () => {
     expect(x.consumer.seeks).toEqual([{ topic: 'avs.events', partition: 3, offset: '9' }]);
   });
 
-  test('initializes and resumes every rebalance assignment generation', async () => {
-    const x = setup();
+  test('drains prior work before rebalance seeks and resumes', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const x = setup({ handler: { async handle() { await pending; return 'ack'; } } });
     await x.runtime.start();
+    const delivery = x.consumer.emit(record('0'));
     x.offsets.values.set('avs.events:2', '7');
     x.consumer.resumed = false;
-    await x.consumer.rebalance([{ partition: 2, low: '5', high: '9', position: '9' }]);
+    const rebalance = x.consumer.rebalance([{ partition: 2, low: '5', high: '9', position: '9' }]);
+    await Promise.resolve();
+    expect(x.consumer.resumed).toBe(false);
+    expect(x.consumer.seeks.at(-1)).toEqual({ topic: 'avs.events', partition: 0, offset: '0' });
+    release();
+    await Promise.all([delivery, rebalance]);
     expect(x.consumer.seeks.at(-1)).toEqual({ topic: 'avs.events', partition: 2, offset: '7' });
     expect(x.consumer.resumed).toBe(true);
   });
@@ -201,6 +209,18 @@ describe('DurableInboundConsumer', () => {
     await x.consumer.emit(record('1', 0, new Uint8Array([0xff])));
     expect(x.dead).toHaveLength(2);
     expect(x.consumer.commits.at(-1)?.offset).toBe('2');
+  });
+
+  test.each(['checkpoint unavailable', 'dlq unavailable'])('rejects catch-up when %s rejects', async (failure) => {
+    const x = setup({ deadLetters: { async write() { throw new Error('dlq unavailable'); } } });
+    await x.runtime.start();
+    if (failure === 'checkpoint unavailable') x.offsets.failSave = true;
+    const catchUp = x.runtime.caughtUp();
+    const delivery = failure === 'checkpoint unavailable'
+      ? x.consumer.emit(record('0'))
+      : x.consumer.emit(record('0', 0, 'not-json'));
+    await expect(delivery).rejects.toThrow(failure);
+    await expect(catchUp).rejects.toThrow(failure);
   });
 
   test('bounds retries then dead-letters and advances', async () => {
@@ -339,12 +359,23 @@ describe('DurableInboundConsumer', () => {
     await current.runtime.caughtUp();
   });
 
-  test('disconnects after stop failure and preserves the stop error', async () => {
+  test('aggregates shutdown stop, drain, and disconnect failures', async () => {
     const x = setup();
     await x.runtime.start();
     x.consumer.stopError = new Error('stop failed');
     x.consumer.disconnectError = new Error('disconnect failed');
-    await expect(x.runtime.shutdown()).rejects.toThrow('stop failed');
+    x.offsets.failSave = true;
+    const delivery = x.consumer.emit(record('0'));
+    try {
+      await x.runtime.shutdown();
+      throw new Error('expected shutdown failure');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors.map((item) => (item as Error).message)).toEqual([
+        'stop failed', 'checkpoint unavailable', 'disconnect failed',
+      ]);
+    }
+    await expect(delivery).rejects.toThrow('checkpoint unavailable');
     expect(x.consumer.disconnected).toBe(true);
   });
 

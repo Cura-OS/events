@@ -161,19 +161,8 @@ export class DurableInboundConsumer<T = unknown> {
     } catch (error) {
       this.accepting = false;
       this.rejectCatchUp(error);
-      const cleanupErrors: unknown[] = [];
-      try { await this.consumer.stop(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
-      await Promise.allSettled(this.partitions.values());
-      try { await this.consumer.disconnect(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
-      if (cleanupErrors.length > 0) {
-        // oxlint-disable-next-line preserve-caught-error -- AggregateError carries primary in errors and cause.
-        throw new AggregateError(
-          [error, ...cleanupErrors],
-          'consumer startup and cleanup failed',
-          { cause: error },
-        );
-      }
-      throw error;
+      const cleanupErrors = await this.cleanup();
+      throw this.withCleanup(error, cleanupErrors, 'consumer startup and cleanup failed');
     }
   }
 
@@ -186,23 +175,23 @@ export class DurableInboundConsumer<T = unknown> {
   async shutdown(): Promise<void> {
     this.accepting = false;
     this.rejectCatchUp(new Error('consumer shut down before catch-up'));
-    let primary: unknown;
-    try {
-      try {
-        await this.consumer.stop();
-      } catch (error) {
-        primary = error;
-      }
-      const results = await Promise.allSettled(this.partitions.values());
-      primary ??= results.find((result) => result.status === 'rejected')?.reason;
-    } finally {
-      try {
-        await this.consumer.disconnect();
-      } catch (error) {
-        primary ??= error;
-      }
-    }
-    if (primary !== undefined) throw primary;
+    const cleanupErrors = await this.cleanup();
+    if (cleanupErrors.length > 0) throw this.withCleanup(cleanupErrors[0], cleanupErrors.slice(1), 'consumer shutdown failed');
+  }
+
+  private async cleanup(): Promise<unknown[]> {
+    const errors: unknown[] = [];
+    try { await this.consumer.stop(); } catch (error) { errors.push(error); }
+    const jobs = await Promise.allSettled(this.partitions.values());
+    for (const job of jobs) if (job.status === 'rejected') errors.push(job.reason);
+    try { await this.consumer.disconnect(); } catch (error) { errors.push(error); }
+    return errors;
+  }
+
+  private withCleanup(primary: unknown, cleanupErrors: readonly unknown[], message: string): unknown {
+    if (cleanupErrors.length === 0) return primary;
+    // oxlint-disable-next-line preserve-caught-error -- AggregateError carries primary in errors and cause.
+    return new AggregateError([primary, ...cleanupErrors], message, { cause: primary });
   }
 
   private resetCatchUp(): void {
@@ -220,14 +209,17 @@ export class DurableInboundConsumer<T = unknown> {
 
   private async initializeAssignments(assignments: readonly ConsumerAssignment[]): Promise<void> {
     this.accepting = false;
-    if (this.assignmentGeneration > 0) {
-      this.rejectCatchUp(new Error('assignment replaced before catch-up'));
-      this.resetCatchUp();
-    }
-    this.assignmentGeneration += 1;
-    this.bootHighWatermarks.clear();
-    this.caughtPartitions.clear();
     try {
+      if (this.assignmentGeneration > 0) {
+        this.rejectCatchUp(new Error('assignment replaced before catch-up'));
+        const jobs = await Promise.allSettled(this.partitions.values());
+        const rejected = jobs.find((job) => job.status === 'rejected');
+        if (rejected?.status === 'rejected') throw rejected.reason;
+        this.resetCatchUp();
+      }
+      this.assignmentGeneration += 1;
+      this.bootHighWatermarks.clear();
+      this.caughtPartitions.clear();
       const checkpoints = new Map(
         (await this.offsets.loadTopic(this.topic)).map(({ partition, offset }) => [partition, offset]),
       );
@@ -274,10 +266,10 @@ export class DurableInboundConsumer<T = unknown> {
     );
     this.partitions.set(key, pending);
     void pending
+      .catch((error) => this.rejectCatchUp(error))
       .finally(() => {
         if (this.partitions.get(key) === pending) this.partitions.delete(key);
-      })
-      .catch(() => {});
+      });
     return pending;
   }
 

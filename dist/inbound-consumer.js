@@ -74,25 +74,8 @@ class DurableInboundConsumer {
         catch (error) {
             this.accepting = false;
             this.rejectCatchUp(error);
-            const cleanupErrors = [];
-            try {
-                await this.consumer.stop();
-            }
-            catch (cleanupError) {
-                cleanupErrors.push(cleanupError);
-            }
-            await Promise.allSettled(this.partitions.values());
-            try {
-                await this.consumer.disconnect();
-            }
-            catch (cleanupError) {
-                cleanupErrors.push(cleanupError);
-            }
-            if (cleanupErrors.length > 0) {
-                // oxlint-disable-next-line preserve-caught-error -- AggregateError carries primary in errors and cause.
-                throw new AggregateError([error, ...cleanupErrors], 'consumer startup and cleanup failed', { cause: error });
-            }
-            throw error;
+            const cleanupErrors = await this.cleanup();
+            throw this.withCleanup(error, cleanupErrors, 'consumer startup and cleanup failed');
         }
     }
     /** Resolve once every boot-time partition high watermark is checkpointed. */
@@ -103,27 +86,35 @@ class DurableInboundConsumer {
     async shutdown() {
         this.accepting = false;
         this.rejectCatchUp(new Error('consumer shut down before catch-up'));
-        let primary;
+        const cleanupErrors = await this.cleanup();
+        if (cleanupErrors.length > 0)
+            throw this.withCleanup(cleanupErrors[0], cleanupErrors.slice(1), 'consumer shutdown failed');
+    }
+    async cleanup() {
+        const errors = [];
         try {
-            try {
-                await this.consumer.stop();
-            }
-            catch (error) {
-                primary = error;
-            }
-            const results = await Promise.allSettled(this.partitions.values());
-            primary ??= results.find((result) => result.status === 'rejected')?.reason;
+            await this.consumer.stop();
         }
-        finally {
-            try {
-                await this.consumer.disconnect();
-            }
-            catch (error) {
-                primary ??= error;
-            }
+        catch (error) {
+            errors.push(error);
         }
-        if (primary !== undefined)
-            throw primary;
+        const jobs = await Promise.allSettled(this.partitions.values());
+        for (const job of jobs)
+            if (job.status === 'rejected')
+                errors.push(job.reason);
+        try {
+            await this.consumer.disconnect();
+        }
+        catch (error) {
+            errors.push(error);
+        }
+        return errors;
+    }
+    withCleanup(primary, cleanupErrors, message) {
+        if (cleanupErrors.length === 0)
+            return primary;
+        // oxlint-disable-next-line preserve-caught-error -- AggregateError carries primary in errors and cause.
+        return new AggregateError([primary, ...cleanupErrors], message, { cause: primary });
     }
     resetCatchUp() {
         this.catchUpSettled = false;
@@ -139,14 +130,18 @@ class DurableInboundConsumer {
     }
     async initializeAssignments(assignments) {
         this.accepting = false;
-        if (this.assignmentGeneration > 0) {
-            this.rejectCatchUp(new Error('assignment replaced before catch-up'));
-            this.resetCatchUp();
-        }
-        this.assignmentGeneration += 1;
-        this.bootHighWatermarks.clear();
-        this.caughtPartitions.clear();
         try {
+            if (this.assignmentGeneration > 0) {
+                this.rejectCatchUp(new Error('assignment replaced before catch-up'));
+                const jobs = await Promise.allSettled(this.partitions.values());
+                const rejected = jobs.find((job) => job.status === 'rejected');
+                if (rejected?.status === 'rejected')
+                    throw rejected.reason;
+                this.resetCatchUp();
+            }
+            this.assignmentGeneration += 1;
+            this.bootHighWatermarks.clear();
+            this.caughtPartitions.clear();
             const checkpoints = new Map((await this.offsets.loadTopic(this.topic)).map(({ partition, offset }) => [partition, offset]));
             for (const assignment of assignments) {
                 let low;
@@ -190,11 +185,11 @@ class DurableInboundConsumer {
         const pending = (this.partitions.get(key) ?? Promise.resolve()).then(() => this.process(record));
         this.partitions.set(key, pending);
         void pending
+            .catch((error) => this.rejectCatchUp(error))
             .finally(() => {
             if (this.partitions.get(key) === pending)
                 this.partitions.delete(key);
-        })
-            .catch(() => { });
+        });
         return pending;
     }
     async process(record) {

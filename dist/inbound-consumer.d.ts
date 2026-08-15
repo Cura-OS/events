@@ -113,6 +113,8 @@ export declare class DurableInboundConsumer<T = unknown> {
     caughtUp(): Promise<void>;
     /** Stop intake, settle partition jobs, disconnect, then propagate the primary failure. */
     shutdown(): Promise<void>;
+    private cleanup;
+    private withCleanup;
     private resetCatchUp;
     private rejectCatchUp;
     private initializeAssignments;
