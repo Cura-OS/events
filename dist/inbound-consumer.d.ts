@@ -107,6 +107,8 @@ export declare class DurableInboundConsumer<T = unknown> {
     private assignmentTail;
     private readonly assignmentFailures;
     private rejectInitialAssignment?;
+    private startPromise?;
+    private shutdownPromise?;
     private catchUpSettled;
     private caughtUpResolve;
     private caughtUpReject;
@@ -114,10 +116,12 @@ export declare class DurableInboundConsumer<T = unknown> {
     constructor(options: DurableInboundConsumerOptions<T>);
     /** Connect, initialize paused assignments, seek durable starts, then resume intake. */
     start(): Promise<void>;
+    private startInternal;
     /** Resolve once every boot-time partition high watermark is checkpointed. */
     caughtUp(): Promise<void>;
     /** Stop intake, settle partition jobs, disconnect, then propagate the primary failure. */
     shutdown(): Promise<void>;
+    private shutdownInternal;
     private cleanup;
     private withCleanup;
     private resetCatchUp;

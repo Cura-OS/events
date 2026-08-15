@@ -156,14 +156,36 @@ describe('DurableInboundConsumer', () => {
     expect(second.effects).toEqual(['a']);
   });
 
+  test('concurrent starts share one broker lifecycle', async () => {
+    const x = setup();
+    const first = x.runtime.start();
+    const second = x.runtime.start();
+    expect(first).toBe(second);
+    await first;
+    expect(x.consumer.connects).toBe(1);
+    expect(x.consumer.runs).toBe(1);
+  });
+
+  test('shutdown is idempotent', async () => {
+    const x = setup();
+    await x.runtime.start();
+    const first = x.runtime.shutdown();
+    const second = x.runtime.shutdown();
+    expect(first).toBe(second);
+    await first;
+    expect(x.consumer.stops).toBe(1);
+    expect(x.consumer.disconnects).toBe(1);
+  });
+
   test('shutdown during connect prevents later subscribe and run', async () => {
     let release!: () => void;
     const x = setup();
     x.consumer.connectGate = new Promise<void>((resolve) => { release = resolve; });
     const start = x.runtime.start();
     await Promise.resolve();
-    await x.runtime.shutdown();
+    const shutdown = x.runtime.shutdown();
     release();
+    await shutdown;
     await expect(start).rejects.toThrow('shut down');
     expect(x.consumer.subscribes).toBe(0);
     expect(x.consumer.runs).toBe(0);
@@ -178,8 +200,9 @@ describe('DurableInboundConsumer', () => {
     x.consumer.subscribeEntered = entered;
     const start = x.runtime.start();
     await subscribed;
-    await x.runtime.shutdown();
+    const shutdown = x.runtime.shutdown();
     release();
+    await shutdown;
     await expect(start).rejects.toThrow('shut down');
     expect(x.consumer.runs).toBe(0);
   });
@@ -275,6 +298,37 @@ describe('DurableInboundConsumer', () => {
     expect(x.consumer.disconnected).toBe(true);
   });
 
+  test('startup waits for the latest superseding initial assignment', async () => {
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let enteredFirst!: () => void;
+    let enteredSecond!: () => void;
+    const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const second = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const firstEntered = new Promise<void>((resolve) => { enteredFirst = resolve; });
+    const secondEntered = new Promise<void>((resolve) => { enteredSecond = resolve; });
+    const x = setup();
+    x.consumer.awaitAssignmentCallbacks = false;
+    let calls = 0;
+    x.offsets.loadTopic = async () => {
+      calls += 1;
+      if (calls === 1) { enteredFirst(); await first; }
+      else { enteredSecond(); await second; }
+      return [];
+    };
+    const start = x.runtime.start();
+    await firstEntered;
+    const rebalance = x.consumer.rebalance([{ partition: 1, low: '0', high: '1', position: '1' }]);
+    releaseFirst();
+    await secondEntered;
+    let settled = false;
+    void start.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    releaseSecond();
+    await Promise.all([start, rebalance]);
+  });
+
   test('validates every assignment before seeking or resuming', async () => {
     const x = setup();
     x.consumer.assignments = [
@@ -334,6 +388,15 @@ describe('DurableInboundConsumer', () => {
     expect(x.dead).toEqual([]);
     expect(x.effects).toEqual([]);
     expect(x.consumer.commits).toEqual([]);
+  });
+
+  test('accepts asynchronously validated records', async () => {
+    const x = setup({ schema: z.object({ id: z.string().refine(async () => true) }) });
+    await x.runtime.start();
+    await x.consumer.emit(record('0'));
+    expect(x.effects).toEqual(['a']);
+    expect(x.dead).toEqual([]);
+    expect(x.consumer.commits[0]?.offset).toBe('1');
   });
 
   test('dead-letters poison before advancing', async () => {
@@ -595,6 +658,8 @@ describe('DurableInboundConsumer', () => {
     await x.runtime.start();
     const delivery = x.consumer.emit(record('0'));
     const shutdown = x.runtime.shutdown();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(x.consumer.stopped).toBe(true);
     expect(x.consumer.disconnected).toBe(false);
     release();

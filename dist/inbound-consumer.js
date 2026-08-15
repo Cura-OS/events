@@ -48,6 +48,8 @@ class DurableInboundConsumer {
     assignmentTail = Promise.resolve();
     assignmentFailures = [];
     rejectInitialAssignment;
+    startPromise;
+    shutdownPromise;
     catchUpSettled = false;
     caughtUpResolve;
     caughtUpReject;
@@ -69,9 +71,12 @@ class DurableInboundConsumer {
         this.resetCatchUp();
     }
     /** Connect, initialize paused assignments, seek durable starts, then resume intake. */
-    async start() {
+    start() {
         if (this.closed)
-            throw new Error('consumer has shut down');
+            return Promise.reject(new Error('consumer has shut down'));
+        return this.startPromise ??= this.startInternal();
+    }
+    async startInternal() {
         try {
             await this.consumer.connect();
             if (this.closed)
@@ -87,7 +92,7 @@ class DurableInboundConsumer {
             });
             this.rejectInitialAssignment = rejectInitialAssignment;
             void initialAssignment.catch(() => { });
-            let awaitingInitialAssignment = true;
+            let latestInitialEpoch = 0;
             try {
                 await this.consumer.run({
                     autoCommit: false,
@@ -95,10 +100,11 @@ class DurableInboundConsumer {
                     eachMessage: (record) => this.enqueue(record),
                     eachAssignment: (assignments) => {
                         const pending = this.enqueueAssignments(assignments);
-                        if (awaitingInitialAssignment) {
-                            awaitingInitialAssignment = false;
-                            void pending.then(resolveInitialAssignment, rejectInitialAssignment);
-                        }
+                        const epoch = this.assignmentEpoch;
+                        latestInitialEpoch = epoch;
+                        void pending.then(() => { if (epoch === latestInitialEpoch && epoch === this.assignmentEpoch)
+                            resolveInitialAssignment(); }, (error) => { if (epoch === latestInitialEpoch && epoch === this.assignmentEpoch)
+                            rejectInitialAssignment(error); });
                         return pending;
                     },
                 });
@@ -122,12 +128,16 @@ class DurableInboundConsumer {
         return this.caughtUpPromise;
     }
     /** Stop intake, settle partition jobs, disconnect, then propagate the primary failure. */
-    async shutdown() {
+    shutdown() {
+        return this.shutdownPromise ??= this.shutdownInternal();
+    }
+    async shutdownInternal() {
         this.closed = true;
         this.accepting = false;
         this.assignmentEpoch += 1;
         this.rejectInitialAssignment?.(new Error('consumer shut down before initial assignment'));
         this.rejectCatchUp(new Error('consumer shut down before catch-up'));
+        await this.startPromise?.catch(() => { });
         const errors = [];
         try {
             await this.consumer.stop();
@@ -289,7 +299,7 @@ class DurableInboundConsumer {
         try {
             if (record.value === null)
                 throw new Error('record value is null');
-            parsed = this.schema.parse(JSON.parse(decode.decode(record.value)));
+            parsed = await this.schema.parseAsync(JSON.parse(decode.decode(record.value)));
         }
         catch (error) {
             await this.deadLetters.write({ record, reason: 'malformed', error });
