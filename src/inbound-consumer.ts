@@ -136,6 +136,8 @@ export class DurableInboundConsumer<T = unknown> {
   private startPromise?: Promise<void>;
   private shutdownPromise?: Promise<void>;
   private tornDown = false;
+  private connected = false;
+  private disconnected = false;
   private catchUpSettled = false;
   private caughtUpResolve!: () => void;
   private caughtUpReject!: (error: unknown) => void;
@@ -167,8 +169,9 @@ export class DurableInboundConsumer<T = unknown> {
   private async startInternal(): Promise<void> {
     try {
       await this.consumer.connect();
+      this.connected = true;
       if (this.closed) {
-        await this.consumer.disconnect();
+        await this.disconnect();
         throw new Error('consumer has shut down');
       }
       await this.consumer.subscribe({ topics: [this.topic], fromBeginning: false });
@@ -202,6 +205,11 @@ export class DurableInboundConsumer<T = unknown> {
         await Promise.race([run, initialAssignment]);
         await initialAssignment;
         if (this.closed) throw new Error('consumer has shut down');
+        void run.catch((error) => {
+          this.assignmentFailures.push(error);
+          this.rejectCatchUp(error);
+          void this.shutdown();
+        });
       } finally {
         this.rejectInitialAssignment = undefined;
       }
@@ -241,8 +249,7 @@ export class DurableInboundConsumer<T = unknown> {
     this.rejectCatchUp(new Error('consumer shut down before catch-up'));
     const errors: unknown[] = [];
     try { await this.consumer.stop(); } catch (error) { errors.push(error); }
-    void this.assignmentTail.catch((error) => { this.assignmentFailures.push(error); });
-    await Promise.resolve();
+    if (this.connected) await this.assignmentTail;
     errors.push(...this.assignmentFailures, ...await this.cleanup(false));
     if (errors.length > 0) throw this.withCleanup(errors[0], errors.slice(1), 'consumer shutdown failed');
   }
@@ -254,9 +261,15 @@ export class DurableInboundConsumer<T = unknown> {
     }
     const jobs = await Promise.allSettled(this.partitions.values());
     for (const job of jobs) if (job.status === 'rejected') errors.push(job.reason);
-    try { await this.consumer.disconnect(); } catch (error) { errors.push(error); }
+    try { await this.disconnect(); } catch (error) { errors.push(error); }
     this.tornDown = true;
     return errors;
+  }
+
+  private async disconnect(): Promise<void> {
+    if (!this.connected || this.disconnected) return;
+    await this.consumer.disconnect();
+    this.disconnected = true;
   }
 
   private withCleanup(primary: unknown, cleanupErrors: readonly unknown[], message: string): unknown {

@@ -51,6 +51,8 @@ class DurableInboundConsumer {
     startPromise;
     shutdownPromise;
     tornDown = false;
+    connected = false;
+    disconnected = false;
     catchUpSettled = false;
     caughtUpResolve;
     caughtUpReject;
@@ -80,8 +82,9 @@ class DurableInboundConsumer {
     async startInternal() {
         try {
             await this.consumer.connect();
+            this.connected = true;
             if (this.closed) {
-                await this.consumer.disconnect();
+                await this.disconnect();
                 throw new Error('consumer has shut down');
             }
             await this.consumer.subscribe({ topics: [this.topic], fromBeginning: false });
@@ -116,6 +119,11 @@ class DurableInboundConsumer {
                 await initialAssignment;
                 if (this.closed)
                     throw new Error('consumer has shut down');
+                void run.catch((error) => {
+                    this.assignmentFailures.push(error);
+                    this.rejectCatchUp(error);
+                    void this.shutdown();
+                });
             }
             finally {
                 this.rejectInitialAssignment = undefined;
@@ -162,8 +170,8 @@ class DurableInboundConsumer {
         catch (error) {
             errors.push(error);
         }
-        void this.assignmentTail.catch((error) => { this.assignmentFailures.push(error); });
-        await Promise.resolve();
+        if (this.connected)
+            await this.assignmentTail;
         errors.push(...this.assignmentFailures, ...await this.cleanup(false));
         if (errors.length > 0)
             throw this.withCleanup(errors[0], errors.slice(1), 'consumer shutdown failed');
@@ -183,13 +191,19 @@ class DurableInboundConsumer {
             if (job.status === 'rejected')
                 errors.push(job.reason);
         try {
-            await this.consumer.disconnect();
+            await this.disconnect();
         }
         catch (error) {
             errors.push(error);
         }
         this.tornDown = true;
         return errors;
+    }
+    async disconnect() {
+        if (!this.connected || this.disconnected)
+            return;
+        await this.consumer.disconnect();
+        this.disconnected = true;
     }
     withCleanup(primary, cleanupErrors, message) {
         if (cleanupErrors.length === 0)

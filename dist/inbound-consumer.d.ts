@@ -110,6 +110,8 @@ export declare class DurableInboundConsumer<T = unknown> {
     private startPromise?;
     private shutdownPromise?;
     private tornDown;
+    private connected;
+    private disconnected;
     private catchUpSettled;
     private caughtUpResolve;
     private caughtUpReject;
@@ -124,6 +126,7 @@ export declare class DurableInboundConsumer<T = unknown> {
     shutdown(): Promise<void>;
     private shutdownInternal;
     private cleanup;
+    private disconnect;
     private withCleanup;
     private resetCatchUp;
     private rejectCatchUp;
