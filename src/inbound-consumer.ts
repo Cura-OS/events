@@ -208,7 +208,7 @@ export class DurableInboundConsumer<T = unknown> {
         void run.catch((error) => {
           this.assignmentFailures.push(error);
           this.rejectCatchUp(error);
-          void this.shutdown();
+          void this.shutdown().catch(() => {});
         });
       } finally {
         this.rejectInitialAssignment = undefined;
