@@ -183,8 +183,9 @@ describe('DurableInboundConsumer', () => {
     x.consumer.connectGate = new Promise<void>((resolve) => { release = resolve; });
     const start = x.runtime.start();
     await Promise.resolve();
-    await x.runtime.shutdown();
+    const shutdown = x.runtime.shutdown();
     release();
+    await shutdown;
     await expect(start).rejects.toThrow('shut down');
     expect(x.consumer.subscribes).toBe(0);
     expect(x.consumer.runs).toBe(0);
@@ -666,6 +667,7 @@ describe('DurableInboundConsumer', () => {
     await x.runtime.start();
     const delivery = x.consumer.emit(record('0'));
     const shutdown = x.runtime.shutdown();
+    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
     expect(x.consumer.stopped).toBe(true);

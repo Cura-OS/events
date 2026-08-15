@@ -122,7 +122,10 @@ class DurableInboundConsumer {
                 void run.catch((error) => {
                     this.assignmentFailures.push(error);
                     this.rejectCatchUp(error);
-                    void this.shutdown().catch(() => { });
+                    void this.shutdown().catch((teardownError) => {
+                        this.assignmentFailures.push(teardownError);
+                        this.rejectCatchUp(teardownError);
+                    });
                 });
             }
             finally {
@@ -132,15 +135,12 @@ class DurableInboundConsumer {
         catch (error) {
             this.accepting = false;
             this.rejectCatchUp(error);
-            try {
-                await this.shutdown();
-            }
-            catch (cleanupError) {
-                const cleanupErrors = (cleanupError instanceof AggregateError ? cleanupError.errors : [cleanupError])
-                    .filter((item) => item !== error);
-                throw this.withCleanup(error, cleanupErrors, 'consumer startup and cleanup failed');
-            }
-            throw error;
+            if (this.closed)
+                throw error;
+            this.closed = true;
+            this.tornDown = true;
+            const cleanupErrors = await this.cleanup();
+            throw this.withCleanup(error, cleanupErrors, 'consumer startup and cleanup failed');
         }
     }
     /** Resolve once every boot-time partition high watermark is checkpointed. */
@@ -163,6 +163,7 @@ class DurableInboundConsumer {
         this.assignmentEpoch += 1;
         this.rejectInitialAssignment?.(new Error('consumer shut down before initial assignment'));
         this.rejectCatchUp(new Error('consumer shut down before catch-up'));
+        await this.startPromise?.catch(() => { });
         const errors = [];
         try {
             await this.consumer.stop();
