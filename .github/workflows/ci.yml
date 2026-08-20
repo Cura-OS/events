@@ -49,7 +49,19 @@ jobs:
           WORKSPACE_TOKEN: ${{ secrets.WORKSPACE_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          git -c "url.https://x-access-token:${WORKSPACE_TOKEN}@github.com/.insteadOf=git@github.com:" \
+          retry_git() {
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge 5 ]; then
+                echo "retry_git: giving up after $attempt attempts: $*" >&2
+                return 1
+              fi
+              echo "retry_git: attempt $attempt failed; retrying in $((2 ** attempt))s" >&2
+              sleep "$((2 ** attempt))"
+              attempt=$((attempt + 1))
+            done
+          }
+          retry_git git -c "url.https://x-access-token:${WORKSPACE_TOKEN}@github.com/.insteadOf=git@github.com:" \
               -c "url.https://x-access-token:${WORKSPACE_TOKEN}@github.com/.insteadOf=https://github.com/" \
             submodule update --init --remote --depth 1 --jobs 8 \
             backend/packages frontend/packages
