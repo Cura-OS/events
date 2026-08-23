@@ -63,7 +63,7 @@ jobs:
           }
           retry_git git -c "url.https://x-access-token:${WORKSPACE_TOKEN}@github.com/.insteadOf=git@github.com:" \
               -c "url.https://x-access-token:${WORKSPACE_TOKEN}@github.com/.insteadOf=https://github.com/" \
-            submodule update --init --remote --depth 1 --jobs 8 \
+            submodule update --init --force --remote --depth 1 --jobs 8 \
             backend/packages frontend/packages
           # Fail closed: an empty package tree would silently degrade the install
           # into "no workspace siblings found" and the gate would stop guarding.
