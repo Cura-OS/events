@@ -1,0 +1,49 @@
+# Cancel CI still queued or running for a PR that just merged or closed.
+#
+# `concurrency: group: tier-b-${{ github.ref }}, cancel-in-progress: true` on
+# the PR-triggered workflows correctly collapses successive pushes on the
+# SAME PR, but a merge or close emits no `pull_request` event for
+# `refs/pull/N/merge`, so nothing ever supersedes that group at the moment
+# the PR stops mattering. The run just sits on its queue slot.
+#
+# Measured 2026-08-22 on the persistent 2-runner (`uid-1000`) pool that
+# `tier-b-fast-ci`'s `codegen-suite` job requires: seven codegen-suite jobs
+# belonging to PRs merged 14:36-15:03 UTC sat queued until a human found and
+# cancelled them at 17:58, 175 to 202 dead minutes each (22.6 aggregate
+# runner-hours that day alone) - ahead of live work, on a pool already at
+# ~100% saturation for hours at a stretch. Across 08-21 to 08-22, 19% of all
+# tier-b/service-lock-drift jobs (50 of 269) never got a runner at all before
+# being cancelled by hand for exactly this reason.
+name: pr-ci-cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  actions: write
+
+jobs:
+  cancel:
+    # Deliberately NOT uid-1000: this job exists to free that pool, so it must
+    # never itself queue behind the runs it is here to cancel.
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 5
+    steps:
+      - name: Cancel queued and in-progress runs for the closed PR's branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          for state in queued in_progress; do
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs?branch=${BRANCH}&status=${state}&per_page=100" \
+              --jq '.workflow_runs[].id' \
+            | while read -r id; do
+                if [ "$id" = "${GITHUB_RUN_ID}" ]; then
+                  continue
+                fi
+                echo "cancelling run ${id} (${state}) on branch ${BRANCH}"
+                gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/cancel" || true
+              done
+          done
