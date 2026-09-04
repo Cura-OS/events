@@ -38,7 +38,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "check:dist": "./scripts/check-dist.sh",
+    "ci": "bun run lint && bun run typecheck && bun run build && bun run test",
     "lint": "oxlint .",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
