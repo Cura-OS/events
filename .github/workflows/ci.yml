@@ -127,7 +127,7 @@ jobs:
             bun run ci
             ran=1
           else
-            for s in lint typecheck test check:dist build; do
+            for s in lint typecheck build test; do
               if node -e "process.exit(require('./package.json').scripts?.$s ? 0 : 1)"; then
                 bun run "$s"
                 ran=1

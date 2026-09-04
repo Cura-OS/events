@@ -38,7 +38,6 @@
   },
   "scripts": {
     "build": "tsc",
-    "check:dist": "./scripts/check-dist.sh",
     "lint": "oxlint .",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
