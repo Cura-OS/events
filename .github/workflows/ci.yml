@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci:
     if: github.event.pull_request.draft == false
@@ -17,6 +21,10 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      TURBO_API: ${{ secrets.TURBO_API }}
+      TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+      TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
     steps:
       - name: Checkout CuraOS parent workspace
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -63,7 +71,7 @@ jobs:
           }
           retry_git git -c "url.https://x-access-token:${WORKSPACE_TOKEN}@github.com/.insteadOf=git@github.com:" \
               -c "url.https://x-access-token:${WORKSPACE_TOKEN}@github.com/.insteadOf=https://github.com/" \
-            submodule update --init --force --remote --depth 1 --jobs 8 \
+            submodule update --init --force --remote --depth 1 --jobs 1 \
             backend/packages frontend/packages
           # Fail closed: an empty package tree would silently degrade the install
           # into "no workspace siblings found" and the gate would stop guarding.
@@ -102,6 +110,18 @@ jobs:
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
+
+      - name: Configure npm registry (Nexus)
+        # Self-hosted runners live on the NetBird mesh; the Nexus proxy-cache at
+        # 100.77.52.131:8081 shares one warm npm cache across the whole fleet
+        # instead of every job cold-fetching from registry.npmjs.org. CI-only:
+        # never committed, or an off-mesh clone would fail to resolve packages.
+        working-directory: curaos-parent
+        run: |
+          cat > bunfig.toml <<'EOF'
+          [install]
+          registry = "http://100.77.52.131:8081/repository/npm-group/"
+          EOF
 
       - name: Install dependencies
         # Not frozen: the overlaid head may legitimately differ from the pinned
