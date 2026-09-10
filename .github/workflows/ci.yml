@@ -29,7 +29,7 @@ jobs:
           token: ${{ secrets.WORKSPACE_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
           path: curaos-parent
           persist-credentials: false
-          ref: 91cf3e17c5f8256b00d70e5ac0820d4f1dfa5031
+          ref: c7b2eaef12c7bdf973fcea7e7dcd7d22567d3c11
           fetch-depth: 0
           submodules: false
 
@@ -156,7 +156,7 @@ jobs:
             if (!isDeepStrictEqual(optionalPeers, [...(recorded.optionalPeers ?? [])].sort())) throw Error("candidate lock optional peers differ: " + path);
           }
           '
-          bun install --frozen-lockfile
+          bun install --frozen-lockfile --network-concurrency 4
           git diff --exit-code "$CURAOS_PARENT_REVISION" -- bun.lock
 
       - name: Build workspace dependencies
@@ -194,7 +194,7 @@ jobs:
       TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_REMOTE_CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
-      CURAOS_PARENT_REVISION: 91cf3e17c5f8256b00d70e5ac0820d4f1dfa5031
+      CURAOS_PARENT_REVISION: c7b2eaef12c7bdf973fcea7e7dcd7d22567d3c11
       CURAOS_MEMBER_PATH: backend/packages/events
       CURAOS_MEMBER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       NPM_CONFIG_REGISTRY: http://100.77.52.131:8081/repository/npm-group/
