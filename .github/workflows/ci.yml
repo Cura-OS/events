@@ -29,7 +29,7 @@ jobs:
           token: ${{ secrets.WORKSPACE_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
           path: curaos-parent
           persist-credentials: false
-          ref: 2d4041bfc104217f4ce4b11005066a0b0f3a979c
+          ref: 7d4c84b6a4d110b8b1b7b9fa349db049841baed3
           fetch-depth: 0
           submodules: false
 
@@ -207,7 +207,7 @@ jobs:
       TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_REMOTE_CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
-      CURAOS_PARENT_REVISION: 2d4041bfc104217f4ce4b11005066a0b0f3a979c
+      CURAOS_PARENT_REVISION: 7d4c84b6a4d110b8b1b7b9fa349db049841baed3
       CURAOS_MEMBER_PATH: backend/packages/events
       CURAOS_MEMBER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       NPM_CONFIG_REGISTRY: http://100.77.52.131:8081/repository/npm-group/
