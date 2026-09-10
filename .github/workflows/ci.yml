@@ -29,7 +29,7 @@ jobs:
           token: ${{ secrets.WORKSPACE_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
           path: curaos-parent
           persist-credentials: false
-          ref: 6cca4cfdeedf05c46a139fba6eb3552186d78c8d
+          ref: 91cf3e17c5f8256b00d70e5ac0820d4f1dfa5031
           fetch-depth: 0
           submodules: false
 
@@ -42,6 +42,15 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CURAOS_PARENT_REVISION"
           git diff --ignore-submodules=all --exit-code "$CURAOS_PARENT_REVISION" -- .
+          command -v lsof >/dev/null
+          find .git/modules -type f -name "*.lock" -print0 | while IFS= read -r -d "" lock; do
+            if lsof -t -- "$lock" >/dev/null 2>&1; then
+              printf "refusing to remove live Git lock: %s
+          " "$lock" >&2
+              exit 1
+            fi
+            rm -f "$lock"
+          done
           git submodule foreach --quiet --recursive 'git rev-parse -q --verify HEAD >/dev/null || printf "%s
           " "$displaypath"' | while read -r path; do
             git submodule deinit --force "$path"
@@ -185,7 +194,7 @@ jobs:
       TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_REMOTE_CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
-      CURAOS_PARENT_REVISION: 6cca4cfdeedf05c46a139fba6eb3552186d78c8d
+      CURAOS_PARENT_REVISION: 91cf3e17c5f8256b00d70e5ac0820d4f1dfa5031
       CURAOS_MEMBER_PATH: backend/packages/events
       CURAOS_MEMBER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       NPM_CONFIG_REGISTRY: http://100.77.52.131:8081/repository/npm-group/
