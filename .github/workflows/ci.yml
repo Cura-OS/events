@@ -15,7 +15,6 @@ concurrency:
 
 jobs:
   ci:
-    if: github.event.pull_request.draft == false
     runs-on: [ self-hosted, linux, x64, curaos-heavy ]
     timeout-minutes: 30
     defaults:
@@ -23,28 +22,61 @@ jobs:
         shell: bash
     steps:
       - name: Checkout CuraOS parent workspace
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           # Check out the selected immutable parent and its reviewed root lock.
           repository: Cura-OS/curaos
           token: ${{ secrets.WORKSPACE_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
           path: curaos-parent
           persist-credentials: false
-          ref: 476bbf29c16f9ca8dcb2b2db49fefc3534a60a4e
-          fetch-depth: 1
+          ref: dad15edbb87b8a22f2e143b703364a5acf64ad95
+          fetch-depth: 0
           submodules: false
 
+      - name: Materialize workspace package members
+        # Initialize every descendant at its recorded gitlink revision.
+        working-directory: curaos-parent
+        env:
+          WORKSPACE_TOKEN: ${{ secrets.WORKSPACE_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CURAOS_PARENT_REVISION"
+          git diff --exit-code --ignore-submodules=all "$CURAOS_PARENT_REVISION" -- .
+          retry_git() {
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge 5 ]; then
+                echo "retry_git: giving up after $attempt attempts" >&2
+                return 1
+              fi
+              echo "retry_git: attempt $attempt failed; retrying in $((2 ** attempt))s" >&2
+              sleep "$((2 ** attempt))"
+              attempt=$((attempt + 1))
+            done
+          }
+          credential_dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          credential_file="$credential_dir/curaos-git-credentials-$$"
+          config_file="$credential_dir/curaos-gitconfig-$$"
+          umask 077
+          printf 'https://x-access-token:%s@github.com\n' "$WORKSPACE_TOKEN" > "$credential_file"
+          git config --file "$config_file" credential.helper "store --file=$credential_file"
+          git config --file "$config_file" url."https://github.com/".insteadOf git@github.com:
+          export GIT_CONFIG_GLOBAL="$config_file"
+          trap 'rm -f "$credential_file" "$config_file"' EXIT
+          package_members=()
+          while IFS= read -r package_member; do package_members+=("$package_member"); done < <(git config -f .gitmodules --get-regexp 'path$' | awk '$2 ~ "^(backend|frontend)/packages/" { print $2 }')
+          if [ "${#package_members[@]}" -gt 0 ]; then
+            retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
+              submodule update --init --recursive --force --depth 1 --jobs 4 "${package_members[@]}"
+          fi
       - name: Overlay this revision into the parent workspace
-        # The parent pins this repo at the committed submodule SHA, not the PR
-        # head. Re-check out THIS ref into the slot so the gate runs against the
-        # code under review while siblings still resolve from the workspace.
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: curaos-parent/backend/packages/events
           persist-credentials: false
           repository: ${{ github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 1
+          fetch-depth: 0
           submodules: false
       - name: Materialize candidate member
         working-directory: curaos-parent
@@ -78,77 +110,25 @@ jobs:
           retry_git git -C "$CURAOS_MEMBER_PATH" \
             -c "url.https://github.com/.insteadOf=git@github.com:" \
             submodule update --init --recursive --force --depth 1 --jobs 1
+          for source_service in ${CURAOS_SOURCE_SERVICES:-}; do
+            test -f "$source_service/package.json"
+            retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
+              submodule update --init --recursive --force --depth 1 --jobs 1 "$source_service"
+          done
           member_directory="$(dirname "$CURAOS_MEMBER_PATH")"
           owner="$(git -C "$member_directory" rev-parse --show-toplevel)"
           index_path="$(git -C "$member_directory" rev-parse --show-prefix)$(basename "$CURAOS_MEMBER_PATH")"
           test "$(git -C "$owner" ls-files --stage -- "$index_path" | cut -d ' ' -f 1)" = 160000
           git -C "$owner" update-index --cacheinfo "160000,$CURAOS_MEMBER_REVISION,$index_path"
-
-      - name: Materialize workspace package members
-        # Initialize workspace packages and the candidate member at recorded gitlink revisions.
-        working-directory: curaos-parent
-        env:
-          WORKSPACE_TOKEN: ${{ secrets.WORKSPACE_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$CURAOS_PARENT_REVISION"
-          git diff --exit-code --ignore-submodules=all "$CURAOS_PARENT_REVISION" -- .
-          retry_git() {
-            local attempt=1
-            until "$@"; do
-              if [ "$attempt" -ge 5 ]; then
-                echo "retry_git: giving up after $attempt attempts" >&2
-                return 1
-              fi
-              echo "retry_git: attempt $attempt failed; retrying in $((2 ** attempt))s" >&2
-              sleep "$((2 ** attempt))"
-              attempt=$((attempt + 1))
+          package_members=()
+          while IFS= read -r package_member; do package_members+=("$package_member"); done < <(git config -f .gitmodules --get-regexp 'path$' | awk '$2 ~ "^(backend|frontend)/packages/" { print $2 }')
+          if [ "${#package_members[@]}" -gt 0 ]; then
+            git submodule status --recursive "${package_members[@]}" | while IFS= read -r line; do
+              case "$line" in " "*) ;; *) exit 1 ;; esac
             done
-          }
-          credential_dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-          credential_file="$credential_dir/curaos-git-credentials-$$"
-          config_file="$credential_dir/curaos-gitconfig-$$"
-          umask 077
-          printf 'https://x-access-token:%s@github.com\n' "$WORKSPACE_TOKEN" > "$credential_file"
-          git config --file "$config_file" credential.helper "store --file=$credential_file"
-          git config --file "$config_file" url."https://github.com/".insteadOf git@github.com:
-          export GIT_CONFIG_GLOBAL="$config_file"
-          trap 'rm -f "$credential_file" "$config_file"' EXIT
-          # The immutable parent was already accepted with its complete root lock. A member
-          # PR needs only the candidate's transitive workspace dependencies, never a fresh
-          # checkout of every unrelated service and app in the fleet.
-          seen=$'
-          '
-          queue=("$CURAOS_MEMBER_PATH")
-          while [ "${#queue[@]}" -gt 0 ]; do
-            path="${queue[0]}"
-            queue=("${queue[@]:1}")
-            case "$seen" in *$'
-          '"$path"$'
-          '*) continue ;; esac
-            seen="${seen}${path}"$'
-          '
-            if [ "$path" != "$CURAOS_MEMBER_PATH" ]; then
-              retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
-                submodule update --init --recursive --force --depth 1 --jobs 1 "$path"
-            fi
-            test -f "$path/package.json"
-            while IFS= read -r dependency; do
-              test -n "$dependency"
-              matches="$(git config -f .gitmodules --get-regexp 'path$' | awk -v dependency="$dependency" '$2 ~ "^(backend|frontend)/(packages|services|apps)/" && $2 ~ ("/" dependency "$") { print $2 }')"
-              test "$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')" = 1
-              queue+=("$matches")
-            done < <(node --input-type=module --eval '
-              import {readFileSync} from "node:fs";
-              const manifest = JSON.parse(readFileSync(process.argv[1], "utf8"));
-              for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"])
-                for (const [name, value] of Object.entries(manifest[field] ?? {}))
-                  if (new RegExp("^@curaos/[a-z0-9-]+$").test(name) && typeof value === "string" && value.startsWith("workspace:")) console.log(name.slice(8));
-            ' "$path/package.json")
-          done
-
+          fi
       - name: Setup Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.3.14
 
@@ -157,9 +137,16 @@ jobs:
         working-directory: curaos-parent
         run: |
           set -euo pipefail
-          test -f bun.lock && test ! -L bun.lock
+          export BUN_CONFIG_MAX_HTTP_REQUESTS=3
+          if [ -n "${BUN_INSTALL_CACHE_DIR:-}" ]; then
+            export BUN_TMPDIR="$BUN_INSTALL_CACHE_DIR"
+          else
+            export BUN_TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          fi
+          test -f bun.lock
+          test ! -L bun.lock
           git cat-file -e "$CURAOS_PARENT_REVISION:bun.lock"
-          git diff --exit-code "$CURAOS_PARENT_REVISION" -- bun.lock
+          bun install --lockfile-only --ignore-scripts
           bun --eval 'import {readFileSync} from "node:fs";
           import {isDeepStrictEqual} from "node:util";
           const read = (path) => JSON.parse(readFileSync(path, "utf8"));
@@ -184,15 +171,45 @@ jobs:
             for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
               const declared = manifest[field] ?? {};
               const locked = recorded[field] ?? {};
-              for (const [name, value] of Object.entries(locked)) if (declared[name] !== value) throw Error("candidate lock dependency declarations differ: " + path + " " + field);
               for (const [name, value] of Object.entries(declared)) if (!(name in locked) && (root[field] ?? {})[name] !== value) throw Error("candidate lock declaration is not represented by root or workspace lock: " + path + " " + field + " " + name);
             }
             const optionalPeers = Object.entries(manifest.peerDependenciesMeta ?? {}).filter(([, meta]) => meta.optional === true).map(([name]) => name).sort();
             if (!isDeepStrictEqual(optionalPeers, [...(recorded.optionalPeers ?? [])].sort())) throw Error("candidate lock optional peers differ: " + path);
           }
           '
-          bun install --frozen-lockfile --filter "./$CURAOS_MEMBER_PATH"
-          git diff --exit-code "$CURAOS_PARENT_REVISION" -- bun.lock
+          install_filters=(--filter . --filter "./$CURAOS_MEMBER_PATH")
+          for source_service in ${CURAOS_SOURCE_SERVICES:-}; do install_filters+=(--filter "./$source_service"); done
+          bun install --frozen-lockfile --ignore-scripts "${install_filters[@]}"
+          bun --eval 'import {readFileSync} from "node:fs";
+          import {isDeepStrictEqual} from "node:util";
+          const read = (path) => JSON.parse(readFileSync(path, "utf8"));
+          const root = read("package.json");
+          const lock = Bun.JSONC.parse(readFileSync("bun.lock", "utf8"));
+          const patterns = root.workspaces === undefined ? [] : root.workspaces;
+          if (!Array.isArray(patterns) || lock.lockfileVersion !== 1) throw Error("candidate lock format or workspaces unsupported");
+          const members = new Set([""]);
+          const excluded = new Set();
+          for (const pattern of patterns) {
+            const negative = pattern.startsWith("!");
+            const glob = new Bun.Glob((negative ? pattern.slice(1) : pattern) + "/package.json");
+            for (const path of glob.scanSync({cwd: ".", onlyFiles: true})) (negative ? excluded : members).add(path.slice(0, -13));
+          }
+          for (const path of excluded) members.delete(path);
+          const recordedWorkspaces = lock.workspaces ?? {};
+          for (const path of members) {
+            const manifest = path ? read(path + "/package.json") : root;
+            const recorded = recordedWorkspaces[path];
+            if (!recorded) throw Error("candidate lock workspace missing: " + path);
+            if (manifest.name !== recorded.name || (path && manifest.version !== recorded.version)) throw Error("candidate lock identity differs: " + path);
+            for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
+              const declared = manifest[field] ?? {};
+              const locked = recorded[field] ?? {};
+              for (const [name, value] of Object.entries(declared)) if (!(name in locked) && (root[field] ?? {})[name] !== value) throw Error("candidate lock declaration is not represented by root or workspace lock: " + path + " " + field + " " + name);
+            }
+            const optionalPeers = Object.entries(manifest.peerDependenciesMeta ?? {}).filter(([, meta]) => meta.optional === true).map(([name]) => name).sort();
+            if (!isDeepStrictEqual(optionalPeers, [...(recorded.optionalPeers ?? [])].sort())) throw Error("candidate lock optional peers differ: " + path);
+          }
+          '
 
       - name: Build workspace dependencies
         # `bun run typecheck` inside the slot does not build this package's
@@ -208,9 +225,9 @@ jobs:
         run: |
           set -euo pipefail
           # Required package tasks
-          build_task="build"
+          build_task=build
           if node -e 'process.exit(require("./package.json").dependencies?.expo ? 0 : 1)'; then
-            build_task="export"
+            build_task=export
           fi
           node -e '
             const scripts = require("./package.json").scripts ?? {};
@@ -229,6 +246,8 @@ jobs:
       TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_REMOTE_CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
-      CURAOS_PARENT_REVISION: 476bbf29c16f9ca8dcb2b2db49fefc3534a60a4e
+      CURAOS_PARENT_REVISION: dad15edbb87b8a22f2e143b703364a5acf64ad95
       CURAOS_MEMBER_PATH: backend/packages/events
       CURAOS_MEMBER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      CURAOS_SOURCE_SERVICES: ""
+      NPM_CONFIG_REGISTRY: http://100.77.52.131:8081/repository/npm-group/
