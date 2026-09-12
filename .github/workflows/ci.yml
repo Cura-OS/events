@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   ci:
-    runs-on: [ self-hosted, linux, x64, curaos-heavy ]
+    runs-on: [ self-hosted, linux, x64, fast ]
     timeout-minutes: 30
     defaults:
       run:
@@ -138,6 +138,10 @@ jobs:
           else
             export BUN_TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           fi
+          config_dir="${RUNNER_TEMP:-$BUN_TMPDIR}/curaos-bun-config"
+          mkdir -p "$config_dir"
+          printf '[install]\nregistry = "http://100.77.52.131:8081/repository/npm-group/"\n' > "$config_dir/.bunfig.toml"
+          export XDG_CONFIG_HOME="$config_dir"
           test -f bun.lock
           test ! -L bun.lock
           git cat-file -e "$CURAOS_PARENT_REVISION:bun.lock"
@@ -171,7 +175,7 @@ jobs:
             if (!isDeepStrictEqual(optionalPeers, [...(recorded.optionalPeers ?? [])].sort())) throw Error("candidate lock optional peers differ: " + path);
           }
           '
-          bun install --frozen-lockfile
+          bun install --frozen-lockfile --network-concurrency 3
           git diff --exit-code "$CURAOS_PARENT_REVISION" -- bun.lock
 
       - name: Build workspace dependencies
