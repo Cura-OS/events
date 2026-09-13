@@ -77,7 +77,11 @@ jobs:
           const workspaces = lock.workspaces ?? {};
           if (lock.lockfileVersion !== 1 || !workspaces[""]) throw Error("candidate lock format or workspaces unsupported");
           const byName = new Map(Object.entries(workspaces).map(([path, record]) => [record.name, path]));
-          const queue = [process.env.CURAOS_MEMBER_PATH, ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean)];
+          const queue = [
+            ...Object.keys(workspaces).filter((path) => /^(?:backend|frontend)\/packages\//.test(path)),
+            process.env.CURAOS_MEMBER_PATH,
+            ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean),
+          ];
           for (const selectedPath of [...queue])
             for (const path of Object.keys(workspaces))
               if (path && selectedPath.startsWith(path + "/")) queue.push(path);
@@ -175,7 +179,11 @@ jobs:
           const workspaces = lock.workspaces ?? {};
           if (lock.lockfileVersion !== 1 || !workspaces[""]) throw Error("candidate lock format or workspaces unsupported");
           const byName = new Map(Object.entries(workspaces).map(([path, record]) => [record.name, path]));
-          const queue = [process.env.CURAOS_MEMBER_PATH, ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean)];
+          const queue = [
+            ...Object.keys(workspaces).filter((path) => /^(?:backend|frontend)\/packages\//.test(path)),
+            process.env.CURAOS_MEMBER_PATH,
+            ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean),
+          ];
           for (const selectedPath of [...queue])
             for (const path of Object.keys(workspaces))
               if (path && selectedPath.startsWith(path + "/")) queue.push(path);
