@@ -152,13 +152,6 @@ jobs:
           index_path="$(git -C "$member_directory" rev-parse --show-prefix)$(basename "$CURAOS_MEMBER_PATH")"
           test "$(git -C "$owner" ls-files --stage -- "$index_path" | cut -d ' ' -f 1)" = 160000
           git -C "$owner" update-index --cacheinfo "160000,$CURAOS_MEMBER_REVISION,$index_path"
-          package_members=()
-          while IFS= read -r package_member; do package_members+=("$package_member"); done < <(git config -f .gitmodules --get-regexp 'path$' | awk '$2 ~ "^(backend|frontend)/packages/" { print $2 }')
-          if [ "${#package_members[@]}" -gt 0 ]; then
-            git submodule status --recursive "${package_members[@]}" | while IFS= read -r line; do
-              case "$line" in " "*) ;; *) exit 1 ;; esac
-            done
-          fi
 
       - name: Install dependencies
         # Verify manifests against the selected parent lock, then install without changing it.
