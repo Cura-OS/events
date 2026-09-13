@@ -29,7 +29,7 @@ jobs:
           path: curaos-parent
           persist-credentials: false
           clean: true
-          ref: 873049ba8b67de2f1006a9406b701d1a975aaeae
+          ref: 909113e0eeb84a91ace5ce5f4c03904abd16cac2
           fetch-depth: 1
           submodules: false
       - name: Setup Bun
@@ -78,7 +78,7 @@ jobs:
           if (lock.lockfileVersion !== 1 || !workspaces[""]) throw Error("candidate lock format or workspaces unsupported");
           const byName = new Map(Object.entries(workspaces).map(([path, record]) => [record.name, path]));
           const queue = [
-            ...Object.keys(workspaces).filter((path) => /^(?:backend|frontend)\/packages\//.test(path)),
+            ...Object.keys(workspaces).filter(Boolean),
             process.env.CURAOS_MEMBER_PATH,
             ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean),
           ];
@@ -102,7 +102,7 @@ jobs:
           if [ "${#workspace_members[@]}" -gt 0 ]; then
             retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
               -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
-              submodule update --init --recursive --force --depth 1 --jobs 4 "${workspace_members[@]}"
+              submodule update --init --recursive --force --depth 1 --no-single-branch --jobs 4 "${workspace_members[@]}"
           fi
       - name: Overlay this revision into the parent workspace
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -165,22 +165,22 @@ jobs:
           export BUN_CONFIG_MAX_HTTP_REQUESTS=3
           bun_tmpdir="$PWD/.bun-tmp-$RANDOM-$$"
           bun_install="$PWD/.bun-install-$RANDOM-$$"
-          bun_cache="$PWD/.bun-cache-$RANDOM-$$"
+          bun_cache="${BUN_INSTALL_CACHE_DIR:-$PWD/.bun-cache-$RANDOM-$$}"
           /bin/mkdir -p "$bun_tmpdir" "$bun_install" "$bun_cache"
-          trap '/bin/rm -rf "$bun_tmpdir" "$bun_install" "$bun_cache"' EXIT
+          trap '/bin/rm -rf "$bun_tmpdir" "$bun_install"' EXIT
           export BUN_TMPDIR="$bun_tmpdir"
           export BUN_INSTALL="$bun_install"
           export BUN_INSTALL_CACHE_DIR="$bun_cache"
           test -f bun.lock
           test ! -L bun.lock
           git cat-file -e "$CURAOS_PARENT_REVISION:bun.lock"
-          export CURAOS_WORKSPACE_CLOSURE="$(bun --eval 'import {readFileSync} from "node:fs";
+          CURAOS_WORKSPACE_CLOSURE="$(bun --eval 'import {readFileSync} from "node:fs";
           const lock = Bun.JSONC.parse(readFileSync("bun.lock", "utf8"));
           const workspaces = lock.workspaces ?? {};
           if (lock.lockfileVersion !== 1 || !workspaces[""]) throw Error("candidate lock format or workspaces unsupported");
           const byName = new Map(Object.entries(workspaces).map(([path, record]) => [record.name, path]));
           const queue = [
-            ...Object.keys(workspaces).filter((path) => /^(?:backend|frontend)\/packages\//.test(path)),
+            ...Object.keys(workspaces).filter(Boolean),
             process.env.CURAOS_MEMBER_PATH,
             ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean),
           ];
@@ -201,6 +201,7 @@ jobs:
               }
           }
           console.log([...selected].sort().join("\n"));')"
+          export CURAOS_WORKSPACE_CLOSURE
           bun --eval 'import {existsSync, readFileSync} from "node:fs";
           import {isDeepStrictEqual} from "node:util";
           const read = (path) => JSON.parse(readFileSync(path, "utf8"));
@@ -270,9 +271,9 @@ jobs:
         run: |
           set -euo pipefail
           # Required package tasks
-          build_task=build
+          build_task="build"
           if node -e 'process.exit(require("./package.json").dependencies?.expo ? 0 : 1)'; then
-            build_task=export
+            build_task="export"
           fi
           node -e '
             const scripts = require("./package.json").scripts ?? {};
@@ -291,7 +292,7 @@ jobs:
       TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_REMOTE_CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
-      CURAOS_PARENT_REVISION: 873049ba8b67de2f1006a9406b701d1a975aaeae
+      CURAOS_PARENT_REVISION: 909113e0eeb84a91ace5ce5f4c03904abd16cac2
       CURAOS_MEMBER_PATH: backend/packages/events
       CURAOS_MEMBER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       CURAOS_SOURCE_SERVICES: ""
