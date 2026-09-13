@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   ci:
-    runs-on: [ self-hosted, linux, x64, fast ]
+    runs-on: [ self-hosted, linux, x64, generic ]
     timeout-minutes: 30
     defaults:
       run:
@@ -29,7 +29,7 @@ jobs:
           path: curaos-parent
           persist-credentials: false
           clean: true
-          ref: 1a80dd01085117874821163cfcfcca119c0e3c05
+          ref: 6023dad0b0d6bb8df521608608c790830d574503
           fetch-depth: 1
           submodules: false
       - name: Setup Bun
@@ -292,7 +292,7 @@ jobs:
       TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_REMOTE_CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
-      CURAOS_PARENT_REVISION: 1a80dd01085117874821163cfcfcca119c0e3c05
+      CURAOS_PARENT_REVISION: 6023dad0b0d6bb8df521608608c790830d574503
       CURAOS_MEMBER_PATH: backend/packages/events
       CURAOS_MEMBER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       CURAOS_SOURCE_SERVICES: ""
