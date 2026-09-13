@@ -77,7 +77,11 @@ jobs:
           const workspaces = lock.workspaces ?? {};
           if (lock.lockfileVersion !== 1 || !workspaces[""]) throw Error("candidate lock format or workspaces unsupported");
           const byName = new Map(Object.entries(workspaces).map(([path, record]) => [record.name, path]));
-          const queue = [process.env.CURAOS_MEMBER_PATH, ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean)];
+          const queue = [
+            ...Object.keys(workspaces).filter((path) => /^(?:backend|frontend)\/packages\//.test(path)),
+            process.env.CURAOS_MEMBER_PATH,
+            ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean),
+          ];
           for (const selectedPath of [...queue])
             for (const path of Object.keys(workspaces))
               if (path && selectedPath.startsWith(path + "/")) queue.push(path);
@@ -162,11 +166,8 @@ jobs:
           bun_tmpdir="$PWD/.bun-tmp-$RANDOM-$$"
           bun_install="$PWD/.bun-install-$RANDOM-$$"
           bun_cache="$PWD/.bun-cache-$RANDOM-$$"
-          candidate_manifest="$PWD/.candidate-package-$RANDOM-$$.json"
-          candidate_lock="$PWD/.candidate-bun-lock-$RANDOM-$$"
-          candidate_scope_lock="$PWD/.candidate-scoped-lock-$RANDOM-$$"
           /bin/mkdir -p "$bun_tmpdir" "$bun_install" "$bun_cache"
-          trap 'test ! -e "$candidate_manifest" || /bin/mv "$candidate_manifest" package.json; test ! -e "$candidate_lock" || /bin/mv "$candidate_lock" bun.lock; /bin/rm -f "$candidate_scope_lock"; /bin/rm -rf "$bun_tmpdir" "$bun_install" "$bun_cache"' EXIT
+          trap '/bin/rm -rf "$bun_tmpdir" "$bun_install" "$bun_cache"' EXIT
           export BUN_TMPDIR="$bun_tmpdir"
           export BUN_INSTALL="$bun_install"
           export BUN_INSTALL_CACHE_DIR="$bun_cache"
@@ -178,7 +179,11 @@ jobs:
           const workspaces = lock.workspaces ?? {};
           if (lock.lockfileVersion !== 1 || !workspaces[""]) throw Error("candidate lock format or workspaces unsupported");
           const byName = new Map(Object.entries(workspaces).map(([path, record]) => [record.name, path]));
-          const queue = [process.env.CURAOS_MEMBER_PATH, ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean)];
+          const queue = [
+            ...Object.keys(workspaces).filter((path) => /^(?:backend|frontend)\/packages\//.test(path)),
+            process.env.CURAOS_MEMBER_PATH,
+            ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean),
+          ];
           for (const selectedPath of [...queue])
             for (const path of Object.keys(workspaces))
               if (path && selectedPath.startsWith(path + "/")) queue.push(path);
@@ -220,30 +225,12 @@ jobs:
             if (!isDeepStrictEqual(optionalPeers, [...(recorded.optionalPeers ?? [])].sort())) throw Error("candidate lock optional peers differ: " + path);
           }
           '
-          /bin/cp package.json "$candidate_manifest"
-          /bin/cp bun.lock "$candidate_lock"
-          bun --eval 'import {existsSync, readFileSync, writeFileSync} from "node:fs";
-          const selected = new Set((process.env.CURAOS_WORKSPACE_CLOSURE ?? "").split(/\s+/).filter((path) => existsSync(path + "/package.json")));
-          const manifest = JSON.parse(readFileSync("package.json", "utf8"));
-          manifest.workspaces = [...selected].sort();
-          writeFileSync("package.json", JSON.stringify(manifest));
-          const lock = Bun.JSONC.parse(readFileSync("bun.lock", "utf8"));
-          lock.workspaces = Object.fromEntries(Object.entries(lock.workspaces ?? {}).filter(([path]) => !path || selected.has(path)));
-          for (const [name, record] of Object.entries(lock.packages ?? {})) {
-            const refs = [...JSON.stringify(record).matchAll(/@workspace:([^"\]]+)/g)].map(([, path]) => path);
-            if (refs.some((path) => !selected.has(path))) delete lock.packages[name];
-          }
-          writeFileSync("bun.lock", JSON.stringify(lock));'
-          /bin/cp bun.lock "$candidate_scope_lock"
           install_filters=(--filter .)
           while IFS= read -r workspace_member; do
             test -n "$workspace_member" || continue
             install_filters+=(--filter "./$workspace_member")
           done <<< "$CURAOS_WORKSPACE_CLOSURE"
           bun install --frozen-lockfile --ignore-scripts "${install_filters[@]}"
-          /usr/bin/cmp -s "$candidate_scope_lock" bun.lock
-          /bin/mv "$candidate_manifest" package.json
-          /bin/mv "$candidate_lock" bun.lock
           bun --eval 'import {existsSync, readFileSync} from "node:fs";
           import {isDeepStrictEqual} from "node:util";
           const read = (path) => JSON.parse(readFileSync(path, "utf8"));
