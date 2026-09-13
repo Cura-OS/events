@@ -32,6 +32,10 @@ jobs:
           ref: 873049ba8b67de2f1006a9406b701d1a975aaeae
           fetch-depth: 1
           submodules: false
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.3.14
 
       - name: Materialize workspace package members
         # Initialize every descendant at its recorded gitlink revision.
@@ -63,12 +67,38 @@ jobs:
           git config --file "$config_file" url."https://github.com/".insteadOf git@github.com:
           export GIT_CONFIG_GLOBAL="$config_file"
           trap 'rm -f "$credential_file" "$config_file"' EXIT
-          package_members=()
-          while IFS= read -r package_member; do package_members+=("$package_member"); done < <(git config -f .gitmodules --get-regexp 'path$' | awk '$2 ~ "^(backend|frontend)/packages/" { print $2 }')
-          if [ "${#package_members[@]}" -gt 0 ]; then
+          workspace_members=()
+          while IFS= read -r workspace_member; do
+            test -n "$workspace_member" || continue
+            git config -f .gitmodules --get-regexp 'path$' | awk -v path="$workspace_member" '$2 == path { found = 1 } END { exit !found }' || continue
+            workspace_members+=("$workspace_member")
+          done < <(bun --eval 'import {readFileSync} from "node:fs";
+          const lock = Bun.JSONC.parse(readFileSync("bun.lock", "utf8"));
+          const workspaces = lock.workspaces ?? {};
+          if (lock.lockfileVersion !== 1 || !workspaces[""]) throw Error("candidate lock format or workspaces unsupported");
+          const byName = new Map(Object.entries(workspaces).map(([path, record]) => [record.name, path]));
+          const queue = [process.env.CURAOS_MEMBER_PATH, ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean)];
+          for (const selectedPath of [...queue])
+            for (const path of Object.keys(workspaces))
+              if (path && selectedPath.startsWith(path + "/")) queue.push(path);
+          const selected = new Set();
+          for (let index = 0; index < queue.length; index += 1) {
+            const path = queue[index];
+            if (selected.has(path)) continue;
+            selected.add(path);
+            const record = workspaces[path];
+            if (!record) continue;
+            for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"])
+              for (const name of Object.keys(record[field] ?? {})) {
+                const dependency = byName.get(name);
+                if (dependency && !selected.has(dependency)) queue.push(dependency);
+              }
+          }
+          console.log([...selected].sort().join("\n"));')
+          if [ "${#workspace_members[@]}" -gt 0 ]; then
             retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
               -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
-              submodule update --init --recursive --force --depth 1 --jobs 4 "${package_members[@]}"
+              submodule update --init --recursive --force --depth 1 --jobs 4 "${workspace_members[@]}"
           fi
       - name: Overlay this revision into the parent workspace
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -129,10 +159,6 @@ jobs:
               case "$line" in " "*) ;; *) exit 1 ;; esac
             done
           fi
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: 1.3.14
 
       - name: Install dependencies
         # Verify manifests against the selected parent lock, then install without changing it.
@@ -151,24 +177,40 @@ jobs:
           test -f bun.lock
           test ! -L bun.lock
           git cat-file -e "$CURAOS_PARENT_REVISION:bun.lock"
-          bun install --lockfile-only --ignore-scripts
-          bun --eval 'import {readFileSync} from "node:fs";
+          export CURAOS_WORKSPACE_CLOSURE="$(bun --eval 'import {readFileSync} from "node:fs";
+          const lock = Bun.JSONC.parse(readFileSync("bun.lock", "utf8"));
+          const workspaces = lock.workspaces ?? {};
+          if (lock.lockfileVersion !== 1 || !workspaces[""]) throw Error("candidate lock format or workspaces unsupported");
+          const byName = new Map(Object.entries(workspaces).map(([path, record]) => [record.name, path]));
+          const queue = [process.env.CURAOS_MEMBER_PATH, ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean)];
+          for (const selectedPath of [...queue])
+            for (const path of Object.keys(workspaces))
+              if (path && selectedPath.startsWith(path + "/")) queue.push(path);
+          const selected = new Set();
+          for (let index = 0; index < queue.length; index += 1) {
+            const path = queue[index];
+            if (selected.has(path)) continue;
+            selected.add(path);
+            const record = workspaces[path];
+            if (!record) continue;
+            for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"])
+              for (const name of Object.keys(record[field] ?? {})) {
+                const dependency = byName.get(name);
+                if (dependency && !selected.has(dependency)) queue.push(dependency);
+              }
+          }
+          console.log([...selected].sort().join("\n"));')"
+          bun --eval 'import {existsSync, readFileSync} from "node:fs";
           import {isDeepStrictEqual} from "node:util";
           const read = (path) => JSON.parse(readFileSync(path, "utf8"));
           const root = read("package.json");
           const lock = Bun.JSONC.parse(readFileSync("bun.lock", "utf8"));
-          const patterns = root.workspaces === undefined ? [] : root.workspaces;
-          if (!Array.isArray(patterns) || lock.lockfileVersion !== 1) throw Error("candidate lock format or workspaces unsupported");
-          const members = new Set([""]);
-          const excluded = new Set();
-          for (const pattern of patterns) {
-            const negative = pattern.startsWith("!");
-            const glob = new Bun.Glob((negative ? pattern.slice(1) : pattern) + "/package.json");
-            for (const path of glob.scanSync({cwd: ".", onlyFiles: true})) (negative ? excluded : members).add(path.slice(0, -13));
-          }
-          for (const path of excluded) members.delete(path);
+          if (!Array.isArray(root.workspaces) || lock.lockfileVersion !== 1) throw Error("candidate lock format or workspaces unsupported");
+          const selected = new Set((process.env.CURAOS_WORKSPACE_CLOSURE ?? "").split(/\s+/).filter(Boolean));
+          selected.add("");
           const recordedWorkspaces = lock.workspaces ?? {};
-          for (const path of members) {
+          for (const path of selected) {
+            if (path && !existsSync(path + "/package.json")) continue;
             const manifest = path ? read(path + "/package.json") : root;
             const recorded = recordedWorkspaces[path];
             if (!recorded) throw Error("candidate lock workspace missing: " + path);
@@ -185,23 +227,17 @@ jobs:
           install_filters=(--filter . --filter "./$CURAOS_MEMBER_PATH")
           for source_service in ${CURAOS_SOURCE_SERVICES:-}; do install_filters+=(--filter "./$source_service"); done
           bun install --frozen-lockfile --ignore-scripts "${install_filters[@]}"
-          bun --eval 'import {readFileSync} from "node:fs";
+          bun --eval 'import {existsSync, readFileSync} from "node:fs";
           import {isDeepStrictEqual} from "node:util";
           const read = (path) => JSON.parse(readFileSync(path, "utf8"));
           const root = read("package.json");
           const lock = Bun.JSONC.parse(readFileSync("bun.lock", "utf8"));
-          const patterns = root.workspaces === undefined ? [] : root.workspaces;
-          if (!Array.isArray(patterns) || lock.lockfileVersion !== 1) throw Error("candidate lock format or workspaces unsupported");
-          const members = new Set([""]);
-          const excluded = new Set();
-          for (const pattern of patterns) {
-            const negative = pattern.startsWith("!");
-            const glob = new Bun.Glob((negative ? pattern.slice(1) : pattern) + "/package.json");
-            for (const path of glob.scanSync({cwd: ".", onlyFiles: true})) (negative ? excluded : members).add(path.slice(0, -13));
-          }
-          for (const path of excluded) members.delete(path);
+          if (!Array.isArray(root.workspaces) || lock.lockfileVersion !== 1) throw Error("candidate lock format or workspaces unsupported");
+          const selected = new Set((process.env.CURAOS_WORKSPACE_CLOSURE ?? "").split(/\s+/).filter(Boolean));
+          selected.add("");
           const recordedWorkspaces = lock.workspaces ?? {};
-          for (const path of members) {
+          for (const path of selected) {
+            if (path && !existsSync(path + "/package.json")) continue;
             const manifest = path ? read(path + "/package.json") : root;
             const recorded = recordedWorkspaces[path];
             if (!recorded) throw Error("candidate lock workspace missing: " + path);
