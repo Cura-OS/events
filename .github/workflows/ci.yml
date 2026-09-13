@@ -28,7 +28,7 @@ jobs:
           token: ${{ secrets.WORKSPACE_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
           path: curaos-parent
           persist-credentials: false
-          ref: f44bfbe809e39fcfa2b8c5a7e6b0a644d6bdaee0
+          ref: e8e2b99d130736be993f3881fd1f81fbf679a6f6
           fetch-depth: 0
           submodules: false
 
@@ -137,6 +137,10 @@ jobs:
         run: |
           set -euo pipefail
           export BUN_CONFIG_MAX_HTTP_REQUESTS=3
+          bun_tmpdir="$PWD/.bun-tmp-$RANDOM-$$"
+          /bin/mkdir -p "$bun_tmpdir"
+          trap '/bin/rm -rf "$bun_tmpdir"' EXIT
+          export BUN_TMPDIR="$bun_tmpdir"
           test -f bun.lock
           test ! -L bun.lock
           git cat-file -e "$CURAOS_PARENT_REVISION:bun.lock"
@@ -240,7 +244,7 @@ jobs:
       TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_REMOTE_CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
-      CURAOS_PARENT_REVISION: f44bfbe809e39fcfa2b8c5a7e6b0a644d6bdaee0
+      CURAOS_PARENT_REVISION: e8e2b99d130736be993f3881fd1f81fbf679a6f6
       CURAOS_MEMBER_PATH: backend/packages/events
       CURAOS_MEMBER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       CURAOS_SOURCE_SERVICES: ""
