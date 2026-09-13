@@ -28,8 +28,9 @@ jobs:
           token: ${{ secrets.WORKSPACE_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
           path: curaos-parent
           persist-credentials: false
-          ref: f44bfbe809e39fcfa2b8c5a7e6b0a644d6bdaee0
-          fetch-depth: 0
+          clean: true
+          ref: 873049ba8b67de2f1006a9406b701d1a975aaeae
+          fetch-depth: 1
           submodules: false
 
       - name: Materialize workspace package members
@@ -66,6 +67,7 @@ jobs:
           while IFS= read -r package_member; do package_members+=("$package_member"); done < <(git config -f .gitmodules --get-regexp 'path$' | awk '$2 ~ "^(backend|frontend)/packages/" { print $2 }')
           if [ "${#package_members[@]}" -gt 0 ]; then
             retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
+              -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
               submodule update --init --recursive --force --depth 1 --jobs 4 "${package_members[@]}"
           fi
       - name: Overlay this revision into the parent workspace
@@ -73,6 +75,7 @@ jobs:
         with:
           path: curaos-parent/backend/packages/events
           persist-credentials: false
+          clean: true
           repository: ${{ github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
@@ -110,9 +113,9 @@ jobs:
             -c "url.https://github.com/.insteadOf=git@github.com:" \
             submodule update --init --recursive --force --depth 1 --jobs 1
           for source_service in ${CURAOS_SOURCE_SERVICES:-}; do
-            test -f "$source_service/package.json"
             retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
               submodule update --init --recursive --force --depth 1 --jobs 1 "$source_service"
+            test -f "$source_service/package.json"
           done
           member_directory="$(dirname "$CURAOS_MEMBER_PATH")"
           owner="$(git -C "$member_directory" rev-parse --show-toplevel)"
@@ -137,6 +140,14 @@ jobs:
         run: |
           set -euo pipefail
           export BUN_CONFIG_MAX_HTTP_REQUESTS=3
+          bun_tmpdir="$PWD/.bun-tmp-$RANDOM-$$"
+          bun_install="$PWD/.bun-install-$RANDOM-$$"
+          bun_cache="$PWD/.bun-cache-$RANDOM-$$"
+          /bin/mkdir -p "$bun_tmpdir" "$bun_install" "$bun_cache"
+          trap '/bin/rm -rf "$bun_tmpdir" "$bun_install" "$bun_cache"' EXIT
+          export BUN_TMPDIR="$bun_tmpdir"
+          export BUN_INSTALL="$bun_install"
+          export BUN_INSTALL_CACHE_DIR="$bun_cache"
           test -f bun.lock
           test ! -L bun.lock
           git cat-file -e "$CURAOS_PARENT_REVISION:bun.lock"
@@ -240,7 +251,7 @@ jobs:
       TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_REMOTE_CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
-      CURAOS_PARENT_REVISION: f44bfbe809e39fcfa2b8c5a7e6b0a644d6bdaee0
+      CURAOS_PARENT_REVISION: 873049ba8b67de2f1006a9406b701d1a975aaeae
       CURAOS_MEMBER_PATH: backend/packages/events
       CURAOS_MEMBER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       CURAOS_SOURCE_SERVICES: ""
