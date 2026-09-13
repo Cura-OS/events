@@ -29,7 +29,7 @@ jobs:
           path: curaos-parent
           persist-credentials: false
           clean: true
-          ref: 1a80dd0108d06a63ca1de3395f55e6c97e3df8cb
+          ref: 1a80dd01085117874821163cfcfcca119c0e3c05
           fetch-depth: 1
           submodules: false
       - name: Setup Bun
@@ -292,7 +292,7 @@ jobs:
       TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_REMOTE_CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
-      CURAOS_PARENT_REVISION: 1a80dd0108d06a63ca1de3395f55e6c97e3df8cb
+      CURAOS_PARENT_REVISION: 1a80dd01085117874821163cfcfcca119c0e3c05
       CURAOS_MEMBER_PATH: backend/packages/events
       CURAOS_MEMBER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       CURAOS_SOURCE_SERVICES: ""
