@@ -217,8 +217,11 @@ jobs:
             if (!isDeepStrictEqual(optionalPeers, [...(recorded.optionalPeers ?? [])].sort())) throw Error("candidate lock optional peers differ: " + path);
           }
           '
-          install_filters=(--filter . --filter "./$CURAOS_MEMBER_PATH")
-          for source_service in ${CURAOS_SOURCE_SERVICES:-}; do install_filters+=(--filter "./$source_service"); done
+          install_filters=(--filter .)
+          while IFS= read -r workspace_member; do
+            test -n "$workspace_member" || continue
+            install_filters+=(--filter "./$workspace_member")
+          done <<< "$CURAOS_WORKSPACE_CLOSURE"
           bun install --frozen-lockfile --ignore-scripts "${install_filters[@]}"
           bun --eval 'import {existsSync, readFileSync} from "node:fs";
           import {isDeepStrictEqual} from "node:util";
