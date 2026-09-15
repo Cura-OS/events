@@ -67,43 +67,9 @@ jobs:
           git config --file "$config_file" url."https://github.com/".insteadOf git@github.com:
           export GIT_CONFIG_GLOBAL="$config_file"
           trap 'rm -f "$credential_file" "$config_file"' EXIT
-          workspace_members=()
-          while IFS= read -r workspace_member; do
-            test -n "$workspace_member" || continue
-            git config -f .gitmodules --get-regexp 'path$' | awk -v path="$workspace_member" '$2 == path { found = 1 } END { exit !found }' || continue
-            workspace_members+=("$workspace_member")
-          done < <(bun --eval 'import {readFileSync} from "node:fs";
-          const lock = Bun.JSONC.parse(readFileSync("bun.lock", "utf8"));
-          const workspaces = lock.workspaces ?? {};
-          if (lock.lockfileVersion !== 1 || !workspaces[""]) throw Error("candidate lock format or workspaces unsupported");
-          const byName = new Map(Object.entries(workspaces).map(([path, record]) => [record.name, path]));
-          const queue = [
-            ...Object.keys(workspaces).filter(Boolean),
-            process.env.CURAOS_MEMBER_PATH,
-            ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean),
-          ];
-          for (const selectedPath of [...queue])
-            for (const path of Object.keys(workspaces))
-              if (path && selectedPath.startsWith(path + "/")) queue.push(path);
-          const selected = new Set();
-          for (let index = 0; index < queue.length; index += 1) {
-            const path = queue[index];
-            if (selected.has(path)) continue;
-            selected.add(path);
-            const record = workspaces[path];
-            if (!record) continue;
-            for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"])
-              for (const name of Object.keys(record[field] ?? {})) {
-                const dependency = byName.get(name);
-                if (dependency && !selected.has(dependency)) queue.push(dependency);
-              }
-          }
-          console.log([...selected].sort().join("\n"));')
-          if [ "${#workspace_members[@]}" -gt 0 ]; then
-            retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
-              -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
-              submodule update --init --recursive --force --depth 1 --no-single-branch --jobs 4 "${workspace_members[@]}"
-          fi
+          retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
+            -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
+            submodule update --init --recursive --force --depth 1 --no-single-branch --jobs 4
       - name: Overlay this revision into the parent workspace
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -156,6 +122,38 @@ jobs:
           index_path="$(git -C "$member_directory" rev-parse --show-prefix)$(basename "$CURAOS_MEMBER_PATH")"
           test "$(git -C "$owner" ls-files --stage -- "$index_path" | cut -d ' ' -f 1)" = 160000
           git -C "$owner" update-index --cacheinfo "160000,$CURAOS_MEMBER_REVISION,$index_path"
+      - name: Materialize overlaid workspace closure
+        working-directory: curaos-parent
+        env:
+          WORKSPACE_TOKEN: ${{ secrets.WORKSPACE_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CURAOS_PARENT_REVISION"
+          git diff --exit-code --ignore-submodules=all "$CURAOS_PARENT_REVISION" -- .
+          retry_git() {
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge 5 ]; then
+                echo "retry_git: giving up after $attempt attempts" >&2
+                return 1
+              fi
+              echo "retry_git: attempt $attempt failed; retrying in $((2 ** attempt))s" >&2
+              sleep "$((2 ** attempt))"
+              attempt=$((attempt + 1))
+            done
+          }
+          credential_dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          credential_file="$credential_dir/curaos-git-credentials-$$"
+          config_file="$credential_dir/curaos-gitconfig-$$"
+          umask 077
+          printf 'https://x-access-token:%s@github.com\n' "$WORKSPACE_TOKEN" > "$credential_file"
+          git config --file "$config_file" credential.helper "store --file=$credential_file"
+          git config --file "$config_file" url."https://github.com/".insteadOf git@github.com:
+          export GIT_CONFIG_GLOBAL="$config_file"
+          trap 'rm -f "$credential_file" "$config_file"' EXIT
+          retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
+            -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
+            submodule update --init --recursive --force --depth 1 --no-single-branch --jobs 4
 
       - name: Install dependencies
         # Verify manifests against the selected parent lock, then install without changing it.
@@ -174,31 +172,30 @@ jobs:
           test -f bun.lock
           test ! -L bun.lock
           git cat-file -e "$CURAOS_PARENT_REVISION:bun.lock"
-          CURAOS_WORKSPACE_CLOSURE="$(bun --eval 'import {readFileSync} from "node:fs";
+          CURAOS_WORKSPACE_CLOSURE="$(bun --eval 'import {existsSync, readFileSync} from "node:fs";
           const lock = Bun.JSONC.parse(readFileSync("bun.lock", "utf8"));
           const workspaces = lock.workspaces ?? {};
           if (lock.lockfileVersion !== 1 || !workspaces[""]) throw Error("candidate lock format or workspaces unsupported");
+          const candidate = process.env.CURAOS_MEMBER_PATH;
+          if (typeof candidate !== "string" || !workspaces[candidate]) throw Error("candidate workspace is absent from the parent lock");
           const byName = new Map(Object.entries(workspaces).map(([path, record]) => [record.name, path]));
-          const queue = [
-            ...Object.keys(workspaces).filter(Boolean),
-            process.env.CURAOS_MEMBER_PATH,
-            ...(process.env.CURAOS_SOURCE_SERVICES ?? "").split(/\s+/).filter(Boolean),
-          ];
-          for (const selectedPath of [...queue])
-            for (const path of Object.keys(workspaces))
-              if (path && selectedPath.startsWith(path + "/")) queue.push(path);
+          const queue = Object.keys(workspaces).filter(Boolean);
           const selected = new Set();
           for (let index = 0; index < queue.length; index += 1) {
             const path = queue[index];
             if (selected.has(path)) continue;
             selected.add(path);
             const record = workspaces[path];
-            if (!record) continue;
+            if (!record) throw Error("candidate workspace is absent from the parent lock");
+            if (!existsSync(path + "/package.json"))
+              throw Error("candidate workspace manifest missing after materialization: " + path);
+            const manifest = JSON.parse(readFileSync(path + "/package.json", "utf8"));
             for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"])
-              for (const name of Object.keys(record[field] ?? {})) {
-                const dependency = byName.get(name);
-                if (dependency && !selected.has(dependency)) queue.push(dependency);
-              }
+              for (const source of [record[field] ?? {}, manifest[field] ?? {}])
+                for (const name of Object.keys(source)) {
+                  const dependency = byName.get(name);
+                  if (dependency && !selected.has(dependency)) queue.push(dependency);
+                }
           }
           console.log([...selected].sort().join("\n"));')"
           export CURAOS_WORKSPACE_CLOSURE
@@ -212,7 +209,8 @@ jobs:
           selected.add("");
           const recordedWorkspaces = lock.workspaces ?? {};
           for (const path of selected) {
-            if (path && !existsSync(path + "/package.json")) continue;
+            if (path && !existsSync(path + "/package.json"))
+              throw Error("candidate workspace manifest missing after materialization: " + path);
             const manifest = path ? read(path + "/package.json") : root;
             const recorded = recordedWorkspaces[path];
             if (!recorded) throw Error("candidate lock workspace missing: " + path);
@@ -226,12 +224,8 @@ jobs:
             if (!isDeepStrictEqual(optionalPeers, [...(recorded.optionalPeers ?? [])].sort())) throw Error("candidate lock optional peers differ: " + path);
           }
           '
-          install_filters=(--filter .)
-          while IFS= read -r workspace_member; do
-            test -n "$workspace_member" || continue
-            install_filters+=(--filter "./$workspace_member")
-          done <<< "$CURAOS_WORKSPACE_CLOSURE"
-          bun install --frozen-lockfile --ignore-scripts "${install_filters[@]}"
+          test ! -e node_modules
+          bun install --frozen-lockfile --ignore-scripts
           bun --eval 'import {existsSync, readFileSync} from "node:fs";
           import {isDeepStrictEqual} from "node:util";
           const read = (path) => JSON.parse(readFileSync(path, "utf8"));
@@ -242,7 +236,8 @@ jobs:
           selected.add("");
           const recordedWorkspaces = lock.workspaces ?? {};
           for (const path of selected) {
-            if (path && !existsSync(path + "/package.json")) continue;
+            if (path && !existsSync(path + "/package.json"))
+              throw Error("candidate workspace manifest missing after materialization: " + path);
             const manifest = path ? read(path + "/package.json") : root;
             const recorded = recordedWorkspaces[path];
             if (!recorded) throw Error("candidate lock workspace missing: " + path);
@@ -271,6 +266,10 @@ jobs:
         run: |
           set -euo pipefail
           # Required package tasks
+          if node -e 'process.exit(require("./package.json").scripts?.ci ? 0 : 1)'; then
+            bun run ci
+            exit "$?"
+          fi
           build_task="build"
           if node -e 'process.exit(require("./package.json").dependencies?.expo ? 0 : 1)'; then
             build_task="export"
@@ -283,10 +282,6 @@ jobs:
           for task in lint typecheck test "$build_task"; do
             bun run "$task" || exit "$?"
           done
-          # Preserve repository-specific obligations until the task graph owns them.
-          if node -e 'process.exit(require("./package.json").scripts?.ci ? 0 : 1)'; then
-            bun run ci
-          fi
     env:
       TURBO_API: ${{ secrets.TURBO_API }}
       TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
