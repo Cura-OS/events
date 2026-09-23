@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -21,6 +21,13 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Remove any stale parent workspace checkout
+        run: |-
+          set -euo pipefail
+          # Fail closed rather than deleting a relative path from whatever the working directory
+          # happens to be: an unset GITHUB_WORKSPACE must refuse, never resolve to ".".
+          test -n "${GITHUB_WORKSPACE:-}"
+          rm -rf -- "$GITHUB_WORKSPACE/curaos-parent"
       - name: Checkout CuraOS parent workspace
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -29,7 +36,7 @@ jobs:
           path: curaos-parent
           persist-credentials: false
           clean: true
-          ref: d011d8cb9a9d81bf7de943919de0f68b8be56b90
+          ref: b8bd4ec3d77acbe3c28f8d269e04d67a6d9bb85c
           fetch-depth: 1
           submodules: false
       - name: Setup Bun
@@ -67,9 +74,45 @@ jobs:
           git config --file "$config_file" url."https://github.com/".insteadOf git@github.com:
           export GIT_CONFIG_GLOBAL="$config_file"
           trap 'rm -f "$credential_file" "$config_file"' EXIT
-          retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
-            -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
-            submodule update --init --recursive --force --depth 1 --no-single-branch --jobs 4
+          sm_paths="$(git config -f .gitmodules --get-regexp '\.path$' 2>/dev/null | awk '{print $2}' || true)"
+          for sm_path in $sm_paths; do
+            if ! test -e "$sm_path/.git"; then continue; fi
+            if git -C "$sm_path" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then continue; fi
+            echo "repairing submodule cache with an unresolvable HEAD: $sm_path" >&2
+            git submodule deinit -f -- "$sm_path"
+          done
+          mirror_root="${RUNNER_GIT_MIRROR_ROOT:-}"
+          mirror_key() {
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+            elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
+            else openssl dgst -sha256 -r | awk '{print $1}'; fi
+          }
+          { git config -f .gitmodules --get-regexp '^submodule\..*\.path$' || true; } | while read -r path_key module_path; do
+            module_name="${path_key#submodule.}"
+            module_name="${module_name%.path}"
+            module_url="$(git config -f .gitmodules --get "submodule.$module_name.url" || true)"
+            # All 221 declared submodules use the https form, so only that is resolved.
+            # Any other form falls through to the unreferenced bulk update below, which
+            # is the same graceful degradation as a cache miss.
+            case "$module_url" in
+              https://github.com/*) normalized="${module_url#https://github.com/}" ;;
+              *) continue ;;
+            esac
+            normalized="https://github.com/${normalized%.git}.git"
+            mirror="$mirror_root/repos/$(printf %s "$normalized" | mirror_key).git"
+            # One check, not two: rev-parse --is-bare-repository already fails for a
+            # path that does not exist, so a separate existence test would be dead code.
+            [ "$(git -C "$mirror" rev-parse --is-bare-repository 2>/dev/null)" = true ] || continue
+            retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
+              submodule update --init --force --depth 1 --no-single-branch \
+              --reference "$mirror" -- "$module_path" || true
+          done
+          workspace_submodule_update() {
+            git -c "url.https://github.com/.insteadOf=git@github.com:" \
+              -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
+              submodule update --init --recursive --force --no-single-branch --jobs 4 --depth "$1"
+          }
+          workspace_submodule_update 1 || retry_git workspace_submodule_update 2147483647
       - name: Overlay this revision into the parent workspace
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -109,12 +152,19 @@ jobs:
           git config --file "$config_file" url."https://github.com/".insteadOf git@github.com:
           export GIT_CONFIG_GLOBAL="$config_file"
           trap 'rm -f "$credential_file" "$config_file"' EXIT
-          retry_git git -C "$CURAOS_MEMBER_PATH" \
-            -c "url.https://github.com/.insteadOf=git@github.com:" \
-            submodule update --init --recursive --force --depth 1 --jobs 1
+          member_submodule_update() {
+            git -C "$CURAOS_MEMBER_PATH" \
+              -c "url.https://github.com/.insteadOf=git@github.com:" \
+              submodule update --init --recursive --force --jobs 1 --depth "$1"
+          }
+          source_submodule_update() {
+            git -c "url.https://github.com/.insteadOf=git@github.com:" \
+              submodule update --init --recursive --force --jobs 1 --depth "$1" "$2"
+          }
+          member_submodule_update 1 || retry_git member_submodule_update 2147483647
           for source_service in ${CURAOS_SOURCE_SERVICES:-}; do
-            retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
-              submodule update --init --recursive --force --depth 1 --jobs 1 "$source_service"
+            source_submodule_update 1 "$source_service" ||
+              retry_git source_submodule_update 2147483647 "$source_service"
             test -f "$source_service/package.json"
           done
           member_directory="$(dirname "$CURAOS_MEMBER_PATH")"
@@ -151,9 +201,45 @@ jobs:
           git config --file "$config_file" url."https://github.com/".insteadOf git@github.com:
           export GIT_CONFIG_GLOBAL="$config_file"
           trap 'rm -f "$credential_file" "$config_file"' EXIT
-          retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
-            -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
-            submodule update --init --recursive --force --depth 1 --no-single-branch --jobs 4
+          sm_paths="$(git config -f .gitmodules --get-regexp '\.path$' 2>/dev/null | awk '{print $2}' || true)"
+          for sm_path in $sm_paths; do
+            if ! test -e "$sm_path/.git"; then continue; fi
+            if git -C "$sm_path" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then continue; fi
+            echo "repairing submodule cache with an unresolvable HEAD: $sm_path" >&2
+            git submodule deinit -f -- "$sm_path"
+          done
+          mirror_root="${RUNNER_GIT_MIRROR_ROOT:-}"
+          mirror_key() {
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+            elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
+            else openssl dgst -sha256 -r | awk '{print $1}'; fi
+          }
+          { git config -f .gitmodules --get-regexp '^submodule\..*\.path$' || true; } | while read -r path_key module_path; do
+            module_name="${path_key#submodule.}"
+            module_name="${module_name%.path}"
+            module_url="$(git config -f .gitmodules --get "submodule.$module_name.url" || true)"
+            # All 221 declared submodules use the https form, so only that is resolved.
+            # Any other form falls through to the unreferenced bulk update below, which
+            # is the same graceful degradation as a cache miss.
+            case "$module_url" in
+              https://github.com/*) normalized="${module_url#https://github.com/}" ;;
+              *) continue ;;
+            esac
+            normalized="https://github.com/${normalized%.git}.git"
+            mirror="$mirror_root/repos/$(printf %s "$normalized" | mirror_key).git"
+            # One check, not two: rev-parse --is-bare-repository already fails for a
+            # path that does not exist, so a separate existence test would be dead code.
+            [ "$(git -C "$mirror" rev-parse --is-bare-repository 2>/dev/null)" = true ] || continue
+            retry_git git -c "url.https://github.com/.insteadOf=git@github.com:" \
+              submodule update --init --force --depth 1 --no-single-branch \
+              --reference "$mirror" -- "$module_path" || true
+          done
+          workspace_submodule_update() {
+            git -c "url.https://github.com/.insteadOf=git@github.com:" \
+              -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
+              submodule update --init --recursive --force --no-single-branch --jobs 4 --depth "$1"
+          }
+          workspace_submodule_update 1 || retry_git workspace_submodule_update 2147483647
 
       - name: Install dependencies
         # Verify manifests against the selected parent lock, then install without changing it.
@@ -163,7 +249,8 @@ jobs:
           export BUN_CONFIG_MAX_HTTP_REQUESTS=3
           bun_tmpdir="$PWD/.bun-tmp-$RANDOM-$$"
           bun_install="$PWD/.bun-install-$RANDOM-$$"
-          bun_cache="${BUN_INSTALL_CACHE_DIR:-$PWD/.bun-cache-$RANDOM-$$}"
+          bun_cache="${BUN_INSTALL_CACHE_DIR:-${RUNNER_TOOL_CACHE:+$RUNNER_TOOL_CACHE/curaos-bun-install-cache}}"
+          bun_cache="${bun_cache:-$PWD/.bun-cache}"
           /bin/mkdir -p "$bun_tmpdir" "$bun_install" "$bun_cache"
           trap '/bin/rm -rf "$bun_tmpdir" "$bun_install"' EXIT
           export BUN_TMPDIR="$bun_tmpdir"
@@ -287,7 +374,7 @@ jobs:
       TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_REMOTE_CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
-      CURAOS_PARENT_REVISION: d011d8cb9a9d81bf7de943919de0f68b8be56b90
+      CURAOS_PARENT_REVISION: b8bd4ec3d77acbe3c28f8d269e04d67a6d9bb85c
       CURAOS_MEMBER_PATH: backend/packages/events
       CURAOS_MEMBER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       CURAOS_SOURCE_SERVICES: ""
